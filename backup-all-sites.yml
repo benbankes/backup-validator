@@ -4,7 +4,7 @@
 # where user and host are the linux user and the linux host machine, respectively
 
 - name: Backup site
-  hosts: flextalkkids.org
+  hosts: all
   vars_files:
     - vars/{{inventory_hostname}}.yml
 
