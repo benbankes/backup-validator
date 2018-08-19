@@ -1,0 +1,73 @@
+# This playbook can be used to create a backup of the files and database of a website
+# To gain ssh access to the remote server, use the following command
+# $ ssh-copy-id user@host
+# where user and host are the linux user and the linux host machine, respectively
+
+- name: Backup site
+  hosts: flextalkkids.org
+  vars_files:
+    - vars/{{inventory_hostname}}.yml
+
+  tasks:
+    - name: Ensure local backup folder does not exist
+      file:
+        path: /home/ben/flextalk-ansible-backups
+        state: absent
+      delegate_to: localhost
+
+    - name: Ensure ansible backup folders does not exist
+      file:
+        path: /home/{{ansible_user_id}}/{{item}}
+        state: absent
+      with_items:
+        - ansible-backup
+        - ansible-backup-archives
+
+    - name: Ensure ansible backup folders exit
+      file:
+        path: /home/{{ansible_user_id}}/{{item}}
+        state: directory
+      with_items:
+        - ansible-backup
+        - ansible-backup-archives
+
+    - name: Copy website files to ansible backup folder
+      command: cp -r /home/{{ansible_user_id}}/{{inventory_hostname}} /home/{{ansible_user_id}}/ansible-backup/files
+
+    - name: Dump database
+      shell: |
+        set timeout -1
+        spawn mysqldump {{mysql_database}} --host={{mysql_host}} --user={{mysql_user}} -p --result-file=/home/{{ansible_user_id}}/ansible-backup/database.sql
+        expect "Enter password: "
+        send "{{mysql_pass}}\n"
+        expect "$ "
+        exit 0
+      args:
+        executable: /usr/bin/expect
+    
+    - name: Create single file archive of backup
+      archive:
+        path: /home/{{ansible_user_id}}/ansible-backup/*
+        dest: /home/{{ansible_user_id}}/ansible-backup-archives/archive.tar.gz
+    
+    - name: Copy archive back here locally
+      fetch:
+        src: /home/{{ansible_user_id}}/ansible-backup-archives/archive.tar.gz
+        dest: /home/ben/flextalk-ansible-backups
+    
+    - name: Ensure boto is installed
+      pip: name={{item}}
+      become: yes
+      with_items:
+        - boto
+        - boto3
+        - botocore
+      delegate_to: localhost
+
+    - name: Upload archive to the cloud
+      aws_s3:
+        bucket: flextalk-backups
+        object: /{{inventory_hostname}}/{{inventory_hostname}}-{{ansible_date_time.date}}.tar.gz
+        src: /home/ben/flextalk-ansible-backups/{{inventory_hostname}}/home/{{ansible_user_id}}/ansible-backup-archives/archive.tar.gz
+        mode: put
+      delegate_to: localhost
