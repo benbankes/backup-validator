@@ -69,12 +69,6 @@
         line: 127.0.0.1 {{hostname}} www.{{hostname}}
         backup: yes
       become: yes
-    - template:
-        src: "{{hostname}}.conf.j2"
-        dest: /etc/apache2/sites-available/{{hostname}}.conf
-        backup: yes
-      become: yes
-      notify: restart apache
     - file:
         src: /etc/apache2/sites-available/{{hostname}}.conf
         dest: /etc/apache2/sites-enabled/{{hostname}}.conf
@@ -82,7 +76,16 @@
         backup: yes
       notify: restart apache
       become: yes
-    - apache2_module: name=rewrite
+    - apache2_module: name={{item}}
+      become: yes
+      notify: restart apache
+      with_items:
+        - rewrite
+        - ssl
+    - template:
+        src: "{{hostname}}.conf.j2"
+        dest: /etc/apache2/sites-available/{{hostname}}.conf
+        backup: yes
       become: yes
       notify: restart apache
     - apt: name={{item}}
