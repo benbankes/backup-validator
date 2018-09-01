@@ -1,0 +1,9 @@
+<VirtualHost *:80>
+    ServerName {{hostname}}
+    ServerAlias www.{{hostname}}
+    DocumentRoot /var/www-tmp/files
+    <Directory "/var/www-tmp/files">
+        AllowOverride All
+        Require all granted
+    </Directory>
+</VirtualHost>

@@ -1,0 +1,109 @@
+# This playbook can be used to revive a website locally
+# This playbook should not be used to recover a live site in production
+# This playbook assumes the following file structur for archive.tar.gz
+# - database.sql
+# - files directory containing all wp files
+# This playbook assumes
+# - Ubuntu 18.04
+#   - Apache 2.4
+#   - PHP 7.2
+#   - MySQL 5.7
+
+- name: Test
+  hosts: localhost
+  vars_files:
+    - vars/mysql.yml
+  roles:
+    - role: geerlingguy.mysql # Uses mysql_root_password
+      become: yes
+
+  tasks:
+    - set_fact:
+        hostname: flextalk.org
+    - name: Ensure an unpacking directory exists
+      file:
+        path: /var/www-tmp
+        state: directory
+        owner: ben
+      become: yes
+    - name: Unarchive backup blob
+      unarchive:
+        src: archive.tar.gz
+        dest: /var/www-tmp
+    - shell: cat /var/www-tmp/files/wp-config.php | grep DB_NAME | cut -d \' -f 4
+      register: results
+      changed_when: no
+    - set_fact:
+        db_name: "{{ results.stdout }}"
+    - shell: cat /var/www-tmp/files/wp-config.php | grep DB_USER | cut -d \' -f 4
+      register: results
+      changed_when: no
+    - set_fact:
+        db_user: "{{ results.stdout }}"
+    - shell: cat /var/www-tmp/files/wp-config.php | grep DB_PASSWORD | cut -d \' -f 4
+      register: results
+      changed_when: no
+    - set_fact:
+        db_password: "{{ results.stdout }}"
+    - mysql_db:
+        login_user: root
+        login_password: "{{mysql_root_password}}"
+        name: "{{db_name}}"
+        state: import
+        target: /var/www-tmp/database.sql
+    - mysql_user:
+        login_user: root
+        login_password: "{{mysql_root_password}}"
+        name: "{{db_user}}"
+        password: "{{db_password}}"
+        priv: "{{db_name}}.*:ALL"
+    - apt: name=apache2
+      notify: restart apache
+      become: yes
+    - service: name=apache2 enabled=yes
+      become: yes
+    - name: add static, local dns entry
+      lineinfile:
+        dest: /etc/hosts
+        regexp: ".*{{hostname}}"
+        line: 127.0.0.1 {{hostname}} www.{{hostname}}
+        backup: yes
+      become: yes
+    - template:
+        src: "{{hostname}}.conf.j2"
+        dest: /etc/apache2/sites-available/{{hostname}}.conf
+        backup: yes
+      become: yes
+      notify: restart apache
+    - file:
+        src: /etc/apache2/sites-available/{{hostname}}.conf
+        dest: /etc/apache2/sites-enabled/{{hostname}}.conf
+        state: link
+        backup: yes
+      notify: restart apache
+      become: yes
+    - apache2_module: name=rewrite
+      become: yes
+      notify: restart apache
+    - apt: name={{item}}
+      with_items:
+        - php
+        - php-common
+        - php-mysqlnd
+      become: yes
+    - ini_file:
+        dest: /etc/php.ini
+        section: Date
+        option: date.timezone
+        value: UTC
+        backup: yes
+      become: yes
+    - lineinfile:
+        dest: /var/www-tmp/files/wp-config.php
+        regexp: DB_HOST
+        line: define('DB_HOST', localhost);
+      backup: yes
+  handlers:
+    - name: restart apache
+      service: name=apache2 state=restarted
+      become: yes
