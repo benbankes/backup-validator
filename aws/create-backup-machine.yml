@@ -1,0 +1,37 @@
+# This playbook can be used to create a new EC2 instance which will perform backups
+# https://docs.ansible.com/ansible/2.5/scenario_guides/guide_aws.html
+
+# Create backup machine at aws with tag
+- name: Create backup machine
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Ensure pip module requirements are installed
+      apt: name={{item}}
+      with_items:
+        - python-pip
+        - virtualenv
+      become: yes
+
+    - name: Ensure boto is installed
+      pip: name=boto
+      become: yes
+
+    - name: Provision an instance
+      ec2:
+        region: us-east-1
+        zone: us-east-1f
+        vpc_subnet_id: subnet-31b23e3d
+        key_name: MyEc2KeyPair
+        group: SshSecurityGroup
+        instance_type: t2.micro
+        image: ami-43a15f3e
+        wait: true
+        exact_count: 1
+        count_tag:
+          Name: backup-creator-tag
+        instance_tags:
+          Name: backup-creator-tag
+        assign_public_ip: yes
+      register: ec2

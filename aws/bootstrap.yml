@@ -1,0 +1,16 @@
+- name: Bootstrap Python2 on target machine(s) 
+  hosts: mine
+  gather_facts: False
+  remote_user: ubuntu
+
+  tasks:
+    - name: See if python is installed
+      raw: test -e /usr/bin/python
+      register: python_test_result
+      ignore_errors: yes
+      changed_when: False
+
+    - name: Install python if not installed
+      become: yes
+      raw: apt install -y python-minimal
+      when: python_test_result.rc #rc=return code
