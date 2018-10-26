@@ -33,6 +33,7 @@
 
     - name: Copy website files to ansible backup folder
       command: cp -r /home/{{ansible_user_id}}/{{inventory_hostname}} /home/{{ansible_user_id}}/ansible-backup/files
+      ignore_errors: yes
 
     - name: Dump database
       shell: |
