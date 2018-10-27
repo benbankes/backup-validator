@@ -6,6 +6,8 @@
 - name: Grant remote access to machines from which backups are being taken
   hosts: all
   gather_facts: false
+  vars_files:
+    - vars/{{inventory_hostname}}.yml
   tasks:
     - name: Ensure backup server has credentials to the machine from which the backups are being taken
       authorized_key:
