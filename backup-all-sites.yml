@@ -3,11 +3,9 @@
 # $ ssh-copy-id user@host
 # where user and host are the linux user and the linux host machine, respectively
 
-- name: Backup site
+- name: Grant remote access to machines from which backups are being taken
   hosts: all
-  vars_files:
-    - vars/{{inventory_hostname}}.yml
-
+  gather_facts: false
   tasks:
     - name: Ensure backup server has credentials to the machine from which the backups are being taken
       authorized_key:
@@ -15,6 +13,12 @@
         state: present
         key: "{{ lookup('file', '/home/ubuntu/.ssh/id_rsa.pub') }}"
 
+- name: Backup site
+  hosts: all
+  vars_files:
+    - vars/{{inventory_hostname}}.yml
+
+  tasks:
     - name: Ensure local backup folder does not exist
       file:
         path: /home/ben/flextalk-ansible-backups
