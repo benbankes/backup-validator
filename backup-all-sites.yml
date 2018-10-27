@@ -66,7 +66,7 @@
     - name: Copy archive back here locally
       fetch:
         src: /home/{{ansible_user_id}}/ansible-backup-archives/archive.tar.gz
-        dest: /home/ben/flextalk-ansible-backups
+        dest: /home/ubuntu/flextalk-ansible-backups
     
     - name: Ensure boto is installed
       pip: name={{item}}
@@ -81,6 +81,6 @@
       aws_s3:
         bucket: flextalk-backups
         object: /{{inventory_hostname}}/{{inventory_hostname}}-{{ansible_date_time.date}}.tar.gz
-        src: /home/ben/flextalk-ansible-backups/{{inventory_hostname}}/home/{{ansible_user_id}}/ansible-backup-archives/archive.tar.gz
+        src: /home/ubuntu/flextalk-ansible-backups/{{inventory_hostname}}/home/{{ansible_user_id}}/ansible-backup-archives/archive.tar.gz
         mode: put
       delegate_to: localhost
