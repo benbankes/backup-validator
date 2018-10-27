@@ -34,4 +34,5 @@
         instance_tags:
           Name: backup-creator-tag
         assign_public_ip: yes
+        instance_profile_name: s3-admin-access
       register: ec2

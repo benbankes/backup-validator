@@ -39,6 +39,12 @@
       user:
         name: ubuntu
         generate_ssh_key: yes
+    - name: Ensure boto dependency virtualenv is installed
+      apt: name={{item}}
+      become: yes
+      with_items:
+        - virtualenv
+        - python-pip
     - name: Command the backup server to perform backups
       command: ansible-playbook backup-all-sites.yml
       args:
