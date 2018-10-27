@@ -11,7 +11,7 @@
   tasks:
     - name: Ensure backup server has credentials to the machine from which the backups are being taken
       authorized_key:
-        user: "{{ansible_user_id}}"
+        user: "{{ansible_user}}"
         state: present
         key: "{{ lookup('file', '/home/ubuntu/.ssh/id_rsa.pub') }}"
 
