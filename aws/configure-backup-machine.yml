@@ -6,9 +6,12 @@
   
 - name: Configure backup machine
   hosts: mine
-  # gather_facts: false
   remote_user: ubuntu
   tasks:
+    - name: Remove ansible playbook
+      file:
+        path: /home/ubuntu/backup-validator
+        state: absent
     - name: Ensure ansible playbook exists
       git:
         repo: 'https://github.com/benbankes/backup-validator.git'
@@ -22,6 +25,24 @@
       copy:
         src: "{{playbook_dir}}/../vars"
         dest: /home/ubuntu/backup-validator/
+    - name: Ensure ansible installation dependency exists
+      apt: name=software-properties-common
+      become: yes
+    - name: Ensure latest ansible repository is used
+      apt_repository:
+        repo: ppa:ansible/ansible
+      become: yes
+    - name: Ensure ansible is installed
+      apt: name=ansible state=latest
+      become: yes
+    - name: Create SSH key if none exists
+      user:
+        name: ubuntu
+        generate_ssh_key: yes
+    - name: Command the backup server to perform backups
+      command: ansible-playbook backup-all-sites.yml
+      args:
+        chdir: /home/ubuntu/backup-validator
     - name: Remove ansible playbook
       file:
         path: /home/ubuntu/backup-validator
