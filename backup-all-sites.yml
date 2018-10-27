@@ -9,6 +9,12 @@
     - vars/{{inventory_hostname}}.yml
 
   tasks:
+    - name: Ensure backup server has credentials to the machine from which the backups are being taken
+      authorized_key:
+        user: ubuntu
+        state: present
+        key: "{{ lookup('file', '/home/ubuntu/.ssh/id_rsa.pub') }}"
+
     - name: Ensure local backup folder does not exist
       file:
         path: /home/ben/flextalk-ansible-backups
