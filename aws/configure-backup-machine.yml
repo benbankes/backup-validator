@@ -1,5 +1,4 @@
 # This playbook can be used to configure a EC2 instance which will perform backups
-# https://docs.ansible.com/ansible/2.5/scenario_guides/guide_aws.html
 
 - name: Ensure Python2 is installed
   include: bootstrap.yml
@@ -8,23 +7,6 @@
   hosts: mine
   remote_user: ubuntu
   tasks:
-    - name: Remove ansible playbook
-      file:
-        path: /home/ubuntu/backup-validator
-        state: absent
-    - name: Ensure ansible playbook exists
-      git:
-        repo: 'https://github.com/benbankes/backup-validator.git'
-        dest: /home/ubuntu/backup-validator
-        update: no
-    - name: Ensure vars folder exists
-      file:
-        path: /home/ubuntu/backup-validator/vars
-        state: directory
-    - name: Copy files with variables
-      copy:
-        src: "{{playbook_dir}}/../vars"
-        dest: /home/ubuntu/backup-validator/
     - name: Ensure ansible installation dependency exists
       apt: name=software-properties-common
       become: yes
@@ -45,11 +27,3 @@
       with_items:
         - virtualenv
         - python-pip
-    - name: Command the backup server to perform backups
-      command: ansible-playbook backup-all-sites.yml
-      args:
-        chdir: /home/ubuntu/backup-validator
-    - name: Remove ansible playbook
-      file:
-        path: /home/ubuntu/backup-validator
-        state: absent
