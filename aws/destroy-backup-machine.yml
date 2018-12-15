@@ -1,0 +1,31 @@
+# This playbook can be used to terminate teh EC2 instance which performs backups
+
+# Create backup machine at aws with tag
+- name: Destroy backup machine
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Ensure pip module requirements are installed
+      apt: name={{item}}
+      with_items:
+        - python-pip
+        - virtualenv
+      become: yes
+
+    - name: Ensure boto is installed
+      pip: name=boto
+      become: yes
+
+    - name: Provision an instance
+      ec2_instance_facts:
+        region: us-east-1
+        filters:
+          "tag:Name": backup-creator-tag
+      register: ec2
+
+    - name: Terminate first instance (should only be one)
+      ec2:
+        region: us-east-1
+        state: absent
+        instance_ids: "{{[ec2.instances[0].instance_id]}}"

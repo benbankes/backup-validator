@@ -3,3 +3,4 @@
 - include: create-backup-machine.yml
 - include: configure-backup-machine.yml
 - include: perform-monthly-backups.yml
+- include: destroy-backup-machine.yml

@@ -1,5 +1,4 @@
 # This playbook can be used to create a new EC2 instance which will perform backups
-# https://docs.ansible.com/ansible/2.5/scenario_guides/guide_aws.html
 
 # Create backup machine at aws with tag
 - name: Create backup machine
