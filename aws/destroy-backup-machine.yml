@@ -17,11 +17,12 @@
       pip: name=boto
       become: yes
 
-    - name: Provision an instance
+    - name: Get running instances
       ec2_instance_facts:
         region: us-east-1
         filters:
           "tag:Name": backup_creator_tag
+          "instance-state-name": running
       register: ec2
 
     - name: Terminate first instance (should only be one)
