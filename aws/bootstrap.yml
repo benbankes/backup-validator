@@ -10,6 +10,11 @@
       ignore_errors: yes
       changed_when: False
 
+    - name: Update apt repositories
+      become: yes
+      raw: apt update
+      when: python_test_result.rc #rc=return code
+
     - name: Install python if not installed
       become: yes
       raw: apt install -y python-minimal
