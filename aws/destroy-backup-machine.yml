@@ -21,7 +21,7 @@
       ec2_instance_facts:
         region: us-east-1
         filters:
-          "tag:Name": backup-creator-tag
+          "tag:Name": backup_creator_tag
       register: ec2
 
     - name: Terminate first instance (should only be one)

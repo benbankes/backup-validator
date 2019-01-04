@@ -29,9 +29,9 @@
         wait: true
         exact_count: 1
         count_tag:
-          Name: backup-creator-tag
+          Name: backup_creator_tag
         instance_tags:
-          Name: backup-creator-tag
+          Name: backup_creator_tag
         assign_public_ip: yes
         instance_profile_name: s3-admin-access
       register: ec2
