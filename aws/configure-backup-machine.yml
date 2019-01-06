@@ -7,6 +7,9 @@
   hosts: mine
   remote_user: ubuntu
   tasks:
+    - name: Upgrade all packages
+      apt: upgrade=safe
+      become: yes
     - name: Ensure ansible installation dependency exists
       apt: name=software-properties-common
       become: yes
