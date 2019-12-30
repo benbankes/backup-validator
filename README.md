@@ -7,7 +7,5 @@ As a development aid, see the AWS documentation at https://docs.ansible.com/ansi
 
 ### Documentation
 
-To perform the monthly backup routine
+See https://docs.google.com/document/d/12w0lXAeLiGzbV37jB2qKJ0b55Vmzyr9MvJzcHh5cC6E
 
-- `cd` into the `aws` folder
-- run `ansible-playbook monthly-backup-routine.yml`
