@@ -1,3 +1,3 @@
-vars
+vars/*.yml
 archive.tar.gz
 .idea
