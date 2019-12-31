@@ -21,11 +21,4 @@
       copy:
         src: "{{playbook_dir}}/../vars"
         dest: /home/ubuntu/backup-validator/
-    - name: Command the backup server to perform backups
-      command: ansible-playbook backup-all-sites.yml
-      args:
-        chdir: /home/ubuntu/backup-validator
-    - name: Remove ansible playbook
-      file:
-        path: /home/ubuntu/backup-validator
-        state: absent
+

@@ -14,8 +14,12 @@
       become: yes
 
     - name: Ensure boto is installed
-      pip: name=boto
+      pip:
+        name: "{{item}}"
       become: yes
+      with_items:
+        - boto
+        - boto3
 
     - name: Get running instances
       ec2_instance_facts:
@@ -30,6 +34,8 @@
         region: us-east-1
         state: absent
         instance_ids: "{{[ec2.instances[0].instance_id]}}"
+        wait: true
     
     - name: Remove terminated host from inventory
       meta: refresh_inventory
+
