@@ -1,8 +1,5 @@
 # This playbook can be used to configure a EC2 instance which will perform backups
 
-- name: Ensure Python2 is installed
-  include: bootstrap.yml
-  
 - name: Configure backup machine
   hosts: mine
   remote_user: ubuntu
@@ -11,22 +8,18 @@
       apt: upgrade=safe
       become: yes
     - name: Ensure ansible installation dependency exists
-      apt: name=software-properties-common
+      apt:
+        name: ['software-properties-common']
       become: yes
-    - name: Ensure latest ansible repository is used
-      apt_repository:
-        repo: ppa:ansible/ansible
-      become: yes
-    - name: Ensure ansible is installed
-      apt: name=ansible state=latest
+    - name: Ensure ansible and sshpass is installed
+      apt:
+        name: ['ansible', 'sshpass']
       become: yes
     - name: Create SSH key if none exists
       user:
         name: ubuntu
         generate_ssh_key: yes
     - name: Ensure boto dependency virtualenv is installed
-      apt: name={{item}}
+      apt:
+        name: ['virtualenv', 'python3-pip']
       become: yes
-      with_items:
-        - virtualenv
-        - python-pip
