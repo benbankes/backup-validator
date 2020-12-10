@@ -17,7 +17,7 @@
       become: yes
 
     - name: Get running instances
-      ec2_instance_facts:
+      ec2_instance_info:
         region: us-east-1
         filters:
           "tag:Name": backup_creator_tag
