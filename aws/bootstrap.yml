@@ -17,5 +17,5 @@
 
     - name: Install python if not installed
       become: yes
-      raw: apt install -y python-minimal
+      raw: apt install -y python3
       when: python_test_result.rc #rc=return code
