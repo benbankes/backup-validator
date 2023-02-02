@@ -69,12 +69,9 @@
         dest: /home/ubuntu/flextalk-ansible-backups
     
     - name: Ensure boto is installed
-      pip: name={{item}}
+      pip:
+        name: ['botocore', 'boto', 'boto3']
       become: yes
-      with_items:
-        - boto
-        - boto3
-        - botocore
       delegate_to: localhost
 
     - name: Upload archive to the cloud

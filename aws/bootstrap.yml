@@ -5,7 +5,7 @@
 
   tasks:
     - name: See if python is installed
-      raw: test -e /usr/bin/python
+      raw: test -e /usr/bin/python3
       register: python_test_result
       ignore_errors: yes
       changed_when: False

@@ -7,22 +7,17 @@
   gather_facts: false
   tasks:
     - name: Ensure pip module requirements are installed
-      apt: name={{item}}
-      with_items:
-        - python-pip
-        - virtualenv
+      apt:
+        name: ['python3-pip', 'virtualenv']
       become: yes
 
     - name: Ensure boto is installed
       pip:
-        name: "{{item}}"
+        name: ['boto', 'boto3']
       become: yes
-      with_items:
-        - boto
-        - boto3
 
     - name: Get running instances
-      ec2_instance_facts:
+      ec2_instance_info:
         region: us-east-1
         filters:
           "tag:Name": backup_creator_tag

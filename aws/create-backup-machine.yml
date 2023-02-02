@@ -7,14 +7,13 @@
   gather_facts: false
   tasks:
     - name: Ensure pip module requirements are installed
-      apt: name={{item}}
-      with_items:
-        - python-pip
-        - virtualenv
+      apt:
+        name: ['python3-pip', 'virtualenv']
       become: yes
 
     - name: Ensure boto is installed
-      pip: name=boto
+      pip:
+        name: ['boto']
       become: yes
 
     - name: Provision an instance
@@ -25,7 +24,7 @@
         key_name: MyEc2KeyPair
         group: SshSecurityGroup
         instance_type: t3.micro
-        image: ami-026c8acd92718196b
+        image: ami-0870650fde0fef2d4
         wait: true
         exact_count: 1
         count_tag:
@@ -36,7 +35,7 @@
         instance_profile_name: s3-admin-access
         volumes:
           - device_name: /dev/sda1
-            volume_type: gp2
+            volume_type: gp3
             delete_on_termination: true
             volume_size: 100
         user_data: "{{lookup('file', 'user_data.sh')}}"
