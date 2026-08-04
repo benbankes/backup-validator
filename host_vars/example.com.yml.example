@@ -1,0 +1,10 @@
+# Server host & credentials from https://panel.dreamhost.com/?tree=users.dashboard
+ansible_host:
+ansible_user:
+ansible_password: 
+
+# Database details from https://panel.dreamhost.com/?tree=advanced.mysql
+mysql_host:
+mysql_database:
+mysql_user:
+mysql_pass:
