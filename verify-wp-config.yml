@@ -1,0 +1,44 @@
+---
+- name: Verify WordPress Database Configuration
+  hosts: all
+  gather_facts: false
+
+  vars:
+    # Adjust this path to where your WordPress site is installed on the remote server
+    wp_root_dir: "/home/{{ ansible_user }}/{{ inventory_hostname }}"
+
+  tasks:
+    - name: Fetch remote wp-config.php file
+      ansible.builtin.slurp:
+        src: "{{ wp_root_dir }}/wp-config.php"
+      register: wp_config_encoded
+
+    - name: Decode wp-config.php content
+      ansible.builtin.set_fact:
+        wp_config_text: "{{ wp_config_encoded['content'] | b64decode }}"
+
+    - name: Parse DB_HOST from wp-config.php
+      ansible.builtin.set_fact:
+        remote_mysql_host: "{{ wp_config_text | regex_search(\"define\\s*\\(\\s*['\\\"]DB_HOST['\\\"]\\s*,\\s*['\\\"](.*?)['\\\"]\\s*\\);\", '\\1') | first }}"
+
+    - name: Parse DB_NAME from wp-config.php
+      ansible.builtin.set_fact:
+        remote_mysql_database: "{{ wp_config_text | regex_search(\"define\\s*\\(\\s*['\\\"]DB_NAME['\\\"]\\s*,\\s*['\\\"](.*?)['\\\"]\\s*\\);\", '\\1') | first }}"
+
+    - name: Parse DB_USER from wp-config.php
+      ansible.builtin.set_fact:
+        remote_mysql_user: "{{ wp_config_text | regex_search(\"define\\s*\\(\\s*['\\\"]DB_USER['\\\"]\\s*,\\s*['\\\"](.*?)['\\\"]\\s*\\);\", '\\1') | first }}"
+
+    - name: Parse DB_PASSWORD from wp-config.php
+      ansible.builtin.set_fact:
+        remote_mysql_pass: "{{ wp_config_text | regex_search(\"define\\s*\\(\\s*['\\\"]DB_PASSWORD['\\\"]\\s*,\\s*['\\\"](.*?)['\\\"]\\s*\\);\", '\\1') | first }}"
+
+    - name: Assert that remote configuration matches host_vars
+      ansible.builtin.assert:
+        that:
+          - remote_mysql_host == mysql_host
+          - remote_mysql_database == mysql_database
+          - remote_mysql_user == mysql_user
+          - remote_mysql_pass == mysql_pass
+        fail_msg: "Database configuration mismatch detected!"
+        success_msg: "WordPress wp-config.php configuration perfectly matches host_vars."

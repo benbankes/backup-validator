@@ -1,0 +1,23 @@
+# This playbook can be used to configure a EC2 instance which will perform backups
+
+# --- Dynamic AWS Discovery Block ---
+- name: Discover active backup orchestrator IP from AWS API
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    aws_region: "us-east-1"
+    tag_name: "backup_creator_tag"
+  tasks:
+    - ansible.builtin.include_tasks: tasks/discover-ip.yml
+
+- name: Trigger remote backup script execution via orchestration engine
+  hosts: backup_box
+  gather_facts: false
+
+  tasks:
+    - name: Kick off backup playbook inside the running instance
+      ansible.builtin.command: "ansible-playbook backup-all-sites.yml"
+      args:
+        chdir: "/home/ubuntu/backup-validator"
+

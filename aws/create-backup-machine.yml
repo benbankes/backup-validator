@@ -5,53 +5,72 @@
   hosts: localhost
   connection: local
   gather_facts: false
+  vars:
+    aws_region: "us-east-1"
+    #aws_zone: "us-east-1f"
+    subnet_id: "subnet-31b23e3d"
+    key_name: "MyEc2KeyPair"
+    security_group: "SshSecurityGroup"
+    instance_type: "t3.micro"
+    iam_profile: "s3-admin-access"
+    tag_name: "backup_creator_tag"
+
   tasks:
-    - name: Ensure pip module requirements are installed
-      apt:
-        name: ['python3-pip', 'virtualenv']
-      become: yes
+    - name: Fetch latest official Ubuntu 26.04 Minimal AMI
+      amazon.aws.ec2_ami_info:
+        region: "{{ aws_region }}"
+        owners: ["099720109477"]  # Official Canonical AWS Account ID
+        filters:
+          name: "ubuntu-minimal/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-minimal-*"
+          architecture: "x86_64"
+          state: "available"
+      register: ubuntu_ami
 
-    - name: Ensure boto is installed
-      pip:
-        name: ['boto']
-      become: yes
+    - name: Set target AMI ID fact
+      ansible.builtin.set_fact:
+        target_ami: "{{ ubuntu_ami.images | sort(attribute='creation_date') | last }}"
 
-    - name: Provision an instance
-      ec2:
-        region: us-east-1
-        zone: us-east-1f
-        vpc_subnet_id: subnet-31b23e3d
-        key_name: MyEc2KeyPair
-        group: SshSecurityGroup
-        instance_type: t3.micro
-        image: ami-0870650fde0fef2d4
+    - name: Provision an EC2 instance
+      amazon.aws.ec2_instance:
+        region: "{{ aws_region }}"
+        #availability_zone: "{{ aws_zone }}"
+        vpc_subnet_id: "{{ subnet_id }}"
+        key_name: "{{ key_name }}"
+        security_groups: "{{ security_group }}"
+        instance_type: "{{ instance_type }}"
+        image_id: "{{ target_ami.image_id }}"
         wait: true
         exact_count: 1
-        count_tag:
-          Name: backup_creator_tag
-        instance_tags:
-          Name: backup_creator_tag
-        assign_public_ip: yes
-        instance_profile_name: s3-admin-access
+        filters:
+          "tag:Name": "{{ tag_name }}"
+          "instance-state-name": running
+        tags:
+          Name: "{{ tag_name }}"
+        network:
+          assign_public_ip: true
+        iam_instance_profile: "{{ iam_profile }}"
         volumes:
           - device_name: /dev/sda1
-            volume_type: gp3
-            delete_on_termination: true
-            volume_size: 100
-        user_data: "{{lookup('file', 'user_data.sh')}}"
-      register: ec2
+            ebs:
+              volume_type: gp3
+              volume_size: 100
+              delete_on_termination: true
+      register: ec2_result
 
-    - name: Add instance to inventory
-      add_host:
-        name: "{{item.public_ip}}"
-        group: mine
-      with_items: "{{ec2.instances}}"
-    
-    - name: Wait for the text "OpenSSH" to appear in a socket connection to port 22
-      wait_for:
-        host: "{{item.public_ip}}"
-        port: 22
-        state: started
-        search_regex: OpenSSH
-      with_items: "{{ec2.instances}}"
+    - name: Add instance to dynamic in-memory inventory
+      ansible.builtin.add_host:
+        name: "{{ item.public_ip_address }}"
+        groups: mine
+        ansible_user: ubuntu
+        ansible_ssh_private_key_file: "~/.ssh/personal-aws/MyEc2KeyPair.pem"
+      loop: "{{ ec2_result.instances }}"
+      when: item.public_ip_address is defined
 
+- name: Validate and configure backup node
+  hosts: mine
+  gather_facts: false
+  tasks:
+    - name: Wait for authenticated SSH handshake to clear
+      ansible.builtin.wait_for_connection:
+        delay: 5
+        timeout: 300

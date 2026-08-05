@@ -1,0 +1,22 @@
+---
+- name: Query active instance configurations
+  amazon.aws.ec2_instance_info:
+    region: "{{ aws_region }}"
+    filters:
+      tag:Name: "{{ tag_name }}"
+      instance-state-name: [running, pending]
+  register: aws_lookup
+
+- name: Fail early if no active backup machine is found
+  ansible.builtin.fail:
+    msg: "No running EC2 instances found matching tag Name={{ tag_name }}"
+  when: aws_lookup.instances | length == 0
+
+- name: Map discovered cloud properties to memory inventory
+  ansible.builtin.add_host:
+    name: "{{ item.public_ip_address }}"
+    groups: mine
+    ansible_user: ubuntu
+    ansible_ssh_private_key_file: "~/.ssh/personal-aws/MyEc2KeyPair.pem"
+  loop: "{{ aws_lookup.instances }}"
+  when: item.public_ip_address is defined

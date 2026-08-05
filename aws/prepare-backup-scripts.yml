@@ -1,24 +1,40 @@
 # This playbook can be used to perform backups remotely
 
+# --- Dynamic AWS Discovery Block ---
+- name: Discover active backup orchestrator IP from AWS API
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    aws_region: "us-east-1"
+    tag_name: "backup_creator_tag"
+  tasks:
+    - ansible.builtin.include_tasks: tasks/discover-ip.yml
+
 - name: Configure backup machine
   hosts: mine
   remote_user: ubuntu
   tasks:
     - name: Remove ansible playbook
-      file:
+      ansible.builtin.file:
         path: /home/ubuntu/backup-validator
         state: absent
+
+    # We clone git to ensure all changes are committed.
+    # Alternately, we could copy the local code (e.g. with uncommitted changes)
+    # However, we favor the safety of committed code over lost code changes.
     - name: Ensure ansible playbook exists
-      git:
+      ansible.builtin.git:
         repo: 'https://github.com/benbankes/backup-validator.git'
         dest: /home/ubuntu/backup-validator
-        update: no
-    - name: Ensure vars folder exists
-      file:
-        path: /home/ubuntu/backup-validator/vars
+        update: false
+    - name: Ensure host_vars folder exists
+      ansible.builtin.file:
+        path: /home/ubuntu/backup-validator/host_vars
         state: directory
+        mode: "0755"
     - name: Copy files with variables
-      copy:
-        src: "{{playbook_dir}}/../vars"
-        dest: /home/ubuntu/backup-validator/
-
+      ansible.builtin.copy:
+        src: "{{playbook_dir}}/../host_vars/" # Trailing slash ensures content-only copying
+        dest: /home/ubuntu/backup-validator/host_vars/
+        mode: "0600" # Restricts raw files so only the ubuntu runner can read them

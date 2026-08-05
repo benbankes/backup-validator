@@ -4,11 +4,8 @@
   hosts: all
   gather_facts: false
   tasks:
-    - name: Import variables
-      include_vars:
-        file: "{{inventory_hostname}}.yml"
     - name: Ensure backup server has credentials to the machine from which the backups are being taken
-      authorized_key:
+      ansible.builtin.authorized_key:
         user: "{{ansible_user}}"
         state: present
         key: "{{ lookup('file', '/home/ubuntu/.ssh/id_rsa.pub') }}"
@@ -17,67 +14,58 @@
   hosts: all
 
   tasks:
-    - name: Import variables
-      include_vars:
-        file: "{{inventory_hostname}}.yml"
-
     - name: Ensure local backup folder does not exist
-      file:
+      ansible.builtin.file:
         path: /home/ben/flextalk-ansible-backups
         state: absent
       delegate_to: localhost
 
     - name: Ensure ansible backup folders does not exist
-      file:
+      ansible.builtin.file:
         path: /home/{{ansible_user_id}}/{{item}}
         state: absent
-      with_items:
+      loop:
         - ansible-backup
         - ansible-backup-archives
 
     - name: Ensure ansible backup folders exist
-      file:
+      ansible.builtin.file:
         path: /home/{{ansible_user_id}}/{{item}}
         state: directory
-      with_items:
+        mode: "0755"
+      loop:
         - ansible-backup
         - ansible-backup-archives
 
     - name: Copy website files to ansible backup folder
-      command: cp -r /home/{{ansible_user_id}}/{{inventory_hostname}} /home/{{ansible_user_id}}/ansible-backup/files
+      ansible.builtin.command: cp -r /home/{{ansible_user_id}}/{{inventory_hostname}} /home/{{ansible_user_id}}/ansible-backup/files
       ignore_errors: yes
 
     - name: Dump database
-      shell: |
-        set timeout -1
-        spawn mysqldump {{mysql_database}} --host={{mysql_host}} --user={{mysql_user}} -p --result-file=/home/{{ansible_user_id}}/ansible-backup/database.sql
-        expect "Enter password: "
-        send "{{mysql_pass}}\n"
-        expect "$ "
-        exit 0
-      args:
-        executable: /usr/bin/expect
+      ansible.builtin.command: >
+        mysqldump {{mysql_database}}
+        --host={{mysql_host}}
+        --user={{mysql_user}}
+        --result-file=/home/{{ansible_user_id}}/ansible-backup/database.sql
+      environment:
+        MYSQL_PWD: "{{mysql_pass}}"
     
     - name: Create single file archive of backup
-      archive:
+      ansible.builtin.archive:
         path: /home/{{ansible_user_id}}/ansible-backup/*
         dest: /home/{{ansible_user_id}}/ansible-backup-archives/archive.tar.gz
+        format: gz
     
     - name: Copy archive back here locally
-      fetch:
+      ansible.builtin.fetch:
         src: /home/{{ansible_user_id}}/ansible-backup-archives/archive.tar.gz
         dest: /home/ubuntu/flextalk-ansible-backups
-    
-    - name: Ensure boto is installed
-      pip:
-        name: ['botocore', 'boto', 'boto3']
-      become: yes
-      delegate_to: localhost
+        flat: true
 
-    - name: Upload archive to the cloud
-      aws_s3:
+    - name: Upload archive to S3
+      amazon.aws.s3_object:
         bucket: flextalk-backups
-        object: /{{inventory_hostname}}/{{inventory_hostname}}-{{ansible_date_time.date}}.tar.gz
+        object: /{{inventory_hostname}}/{{inventory_hostname}}-{{hostvars['localhost']['ansible_date_time']['date']}}.tar.gz
         src: /home/ubuntu/flextalk-ansible-backups/{{inventory_hostname}}/home/{{ansible_user_id}}/ansible-backup-archives/archive.tar.gz
         mode: put
       delegate_to: localhost
