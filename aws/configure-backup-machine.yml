@@ -1,25 +1,41 @@
 # This playbook can be used to configure a EC2 instance which will perform backups
 
+# --- Dynamic AWS Discovery Block ---
+- name: Discover active backup orchestrator IP from AWS API
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    aws_region: "us-east-1"
+    tag_name: "backup_creator_tag"
+  tasks:
+    - ansible.builtin.include_tasks: tasks/discover-ip.yml
+
 - name: Configure backup machine
   hosts: mine
   remote_user: ubuntu
   tasks:
-    - name: Upgrade all packages
-      apt: upgrade=safe
+    - name: Upgrade all system packages cleanly
+      ansible.builtin.apt:
+        upgrade: "yes"
+#        update_cache: true
+        cache_valid_time: 3600
       become: yes
-    - name: Ensure ansible installation dependency exists
-      apt:
-        name: ['software-properties-common']
-      become: yes
-    - name: Ensure ansible and sshpass is installed
-      apt:
-        name: ['ansible', 'sshpass']
-      become: yes
-    - name: Create SSH key if none exists
-      user:
+    - name: Ensure modern dependencies exist for local cloud uploads
+      ansible.builtin.apt:
+        name:
+          - vim
+          - git
+          - ansible
+          - sshpass
+          - python3-boto3
+          # - expect
+        state: present
+      become: true
+    - name: Create SSH key pair for the backup orchestrator account
+      ansible.builtin.user:
         name: ubuntu
-        generate_ssh_key: yes
-    - name: Ensure boto dependency virtualenv is installed
-      apt:
-        name: ['virtualenv', 'python3-pip']
-      become: yes
+        generate_ssh_key: true
+        ssh_key_bits: 4096
+        ssh_key_type: rsa
+      become: true

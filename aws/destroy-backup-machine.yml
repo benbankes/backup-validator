@@ -1,5 +1,16 @@
 # This playbook can be used to terminate teh EC2 instance which performs backups
 
+# --- Dynamic AWS Discovery Block ---
+- name: Discover active backup orchestrator IP from AWS API
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    aws_region: "us-east-1"
+    tag_name: "backup_creator_tag"
+  tasks:
+    - ansible.builtin.include_tasks: tasks/discover-ip.yml
+
 # Create backup machine at aws with tag
 - name: Destroy backup machine
   hosts: localhost
