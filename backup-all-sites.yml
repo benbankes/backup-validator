@@ -1,4 +1,9 @@
 # This playbook can be used to create a backup of the files and database of a website
+# Key steps:
+# - Snapshot the database, placing it in a .tar.gz archive
+# - Append the web files to a folder within the archive, ignoring unreadable files
+# - Compress the archive (gzip)
+# - Upload it to S3
 
 - name: Grant remote access to machines from which backups are being taken
   hosts: all
@@ -41,25 +46,30 @@
       environment:
         MYSQL_PWD: "{{ mysql_pass }}"
 
-    - name: Archive website assets directly (skipping permission-locked files)
+    - name: Step 1 - Add database.sql to the root of a raw tar archive
       ansible.builtin.command: >
-        tar -czf /home/{{ ansible_user }}/ansible-backup-archives/site-files.tar.gz
+        tar -cf /home/{{ ansible_user }}/ansible-backup-archives/archive.tar
+        -C /home/{{ ansible_user }}/ansible-backup-archives
+        database.sql
+
+    - name: Step 2 - Append website files into a dynamic 'files' subdirectory (skipping permission-locked files)
+      ansible.builtin.command: >
+        tar -rf /home/{{ ansible_user }}/ansible-backup-archives/archive.tar
         --ignore-failed-read
+        --transform 's|^{{ inventory_hostname }}|files|'
         -C /home/{{ ansible_user }}
         {{ inventory_hostname }}
-      register: tar_result
-      failed_when: tar_result.rc not in [0, 1]
+      register: tar_append_result
+      failed_when: tar_append_result.rc not in [0, 1] # 0 = Success, 1 = Minor, non-fatal anomalies, e.g. "Some files differ" (e.g. from failure to read some files)
 
-    - name: Pull database backup back to the orchestrator instance
-      ansible.builtin.fetch:
-        src: "/home/{{ ansible_user }}/ansible-backup-archives/database.sql"
-        dest: "/home/ubuntu/flextalk-ansible-backups/{{ inventory_hostname }}/database.sql"
-        flat: true
+    - name: Step 3 - Compress the composite archive directly on the target drive
+      ansible.builtin.command: >
+        gzip -f /home/{{ ansible_user }}/ansible-backup-archives/archive.tar
 
-    - name: Pull site assets archive back to the orchestrator instance
+    - name: Pull unified compressed backup archive back to orchestrator
       ansible.builtin.fetch:
-        src: "/home/{{ ansible_user }}/ansible-backup-archives/site-files.tar.gz"
-        dest: "/home/ubuntu/flextalk-ansible-backups/{{ inventory_hostname }}/site-files.tar.gz"
+        src: "/home/{{ ansible_user }}/ansible-backup-archives/archive.tar.gz"
+        dest: "/home/ubuntu/flextalk-ansible-backups/{{ inventory_hostname }}/archive.tar.gz"
         flat: true
 
     - name: Collect timestamp facts from orchestrator environment
@@ -71,15 +81,7 @@
     - name: Securely upload database to Amazon S3 bucket
       amazon.aws.s3_object:
         bucket: "flextalk-backups"
-        object: "/{{ inventory_hostname }}/{{ inventory_hostname }}-{{ hostvars['localhost']['ansible_date_time']['date'] }}-database.sql"
-        src: "/home/ubuntu/flextalk-ansible-backups/{{ inventory_hostname }}/database.sql"
-        mode: put
-      delegate_to: localhost
-
-    - name: Securely upload site assets to Amazon S3 bucket
-      amazon.aws.s3_object:
-        bucket: "flextalk-backups"
-        object: "/{{ inventory_hostname }}/{{ inventory_hostname }}-{{ hostvars['localhost']['ansible_date_time']['date'] }}-files.tar.gz"
-        src: "/home/ubuntu/flextalk-ansible-backups/{{ inventory_hostname }}/site-files.tar.gz"
+        object: "/{{ inventory_hostname }}/{{ inventory_hostname }}-{{ hostvars['localhost']['ansible_date_time']['date'] }}.tar.gz"
+        src: "/home/ubuntu/flextalk-ansible-backups/{{ inventory_hostname }}/archive.tar.gz"
         mode: put
       delegate_to: localhost
