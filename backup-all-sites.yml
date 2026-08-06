@@ -47,17 +47,17 @@
       environment:
         MYSQL_PWD: "{{ mysql_pass }}"
 
-#    - name: Stream database and website assets into a single compressed archive on the fly
-#      ansible.builtin.shell: >
-#        tar -czf /home/{{ ansible_user }}/ansible-backup-archives/archive.tar.gz
-#        --ignore-failed-read
-#        -C /home/{{ ansible_user }}/ansible-backup-archives database.sql
-#        --transform 's|^{{ inventory_hostname }}|files|'
-#        -C /home/{{ ansible_user }} {{ inventory_hostname }}
-#      register: tar_result
-#      failed_when: tar_result.rc not in [0, 1] # 0 = Success, 1 = Minor, non-fatal anomalies, e.g. "Some files differ" (e.g. from failure to read some files)
+    - name: Stream database and website assets into a single compressed archive on the fly
+      ansible.builtin.shell: >
+        tar -czf /home/{{ ansible_user }}/ansible-backup-archives/archive.tar.gz
+        --ignore-failed-read
+        -C /home/{{ ansible_user }}/ansible-backup-archives database.sql
+        --transform 's|^{{ inventory_hostname }}|files|'
+        -C /home/{{ ansible_user }} {{ inventory_hostname }}
+      register: tar_result
+      failed_when: tar_result.rc not in [0, 1] # 0 = Success, 1 = Minor, non-fatal anomalies, e.g. "Some files differ" (e.g. from failure to read some files)
 
-    # Let's see if this is faster than ansible.builtin.shell (above), which runs at ~600s (10m) for all 4 sites
+    # Let's see if this is faster than ansible.builtin.fetch (replaced), which runs at ~600s (10m) for all 4 sites
     # -B: Runs SCP in batch mode (prevents interactive stalls).
     # -C: Enables SSH-level compression on the wire for any uncompressed database streams.
     - name: Stream file down to the orchestrator via native high-speed SCP
