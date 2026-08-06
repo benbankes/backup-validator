@@ -63,16 +63,11 @@
         dest: "/home/ubuntu/multi-site-backups/{{ inventory_hostname }}/archive.tar.gz"
         flat: true
 
-    - name: Collect timestamp facts from orchestrator environment
-      ansible.builtin.setup:
-        filter: "ansible_date_time"
-      delegate_to: localhost
-      run_once: true
-
     - name: Securely upload unified archive to Amazon S3 bucket
       amazon.aws.s3_object:
         bucket: "flextalk-backups"
-        object: "/{{ inventory_hostname }}/{{ inventory_hostname }}-{{ hostvars['localhost']['ansible_date_time']['date'] }}.tar.gz"
+        # Uses a local pipeline command lookup to insert the date cleanly
+        object: "/{{ inventory_hostname }}/{{ inventory_hostname }}-{{ lookup('ansible.builtin.pipe', 'date +%Y-%m-%d') }}.tar.gz"
         src: "/home/ubuntu/multi-site-backups/{{ inventory_hostname }}/archive.tar.gz"
         mode: put
       delegate_to: localhost
