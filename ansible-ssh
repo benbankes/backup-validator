@@ -1,0 +1,37 @@
+#!/bin/bash
+
+# Ensure a target site parameter was specified
+if [ -z "$1" ]; then
+    echo "Usage: ./ansible-ssh <site-name>"
+    echo "Example: ./ansible-ssh flextalk.org"
+    exit 1
+fi
+
+SITE="$1"
+VARS_FILE="$(dirname "$0")/host_vars/${SITE}.yml"
+
+# Verify that the specific host_vars file profile exists before attempting lookup
+if [ ! -f "$VARS_FILE" ]; then
+    echo "Error: Host variable profile not found at host_vars/${SITE}.yml"
+    exit 1
+fi
+
+# Parse credentials smoothly out of the YAML formatting blocks
+SSH_HOST=$(grep -E '^ansible_host:' "$VARS_FILE" | awk -F'"' '{print $2}' | tr -d '[:space:]')
+SSH_USER=$(grep -E '^ansible_user:' "$VARS_FILE" | awk -F'"' '{print $2}' | tr -d '[:space:]')
+SSH_PASS=$(grep -E '^ansible_password:' "$VARS_FILE" | awk -F'"' '{print $2}' | tr -d '[:space:]')
+
+# If the file didn't use double quotes, fall back to clean colon stripping
+[ -z "$SSH_HOST" ] && SSH_HOST=$(grep -E '^ansible_host:' "$VARS_FILE" | awk '{print $2}' | tr -d '[:space:]')
+[ -z "$SSH_USER" ] && SSH_USER=$(grep -E '^ansible_user:' "$VARS_FILE" | awk '{print $2}' | tr -d '[:space:]')
+[ -z "$SSH_PASS" ] && SSH_PASS=$(grep -E '^ansible_password:' "$VARS_FILE" | awk '{print $2}' | tr -d '[:space:]')
+
+# Check that parsed parameters are populated
+if [ -z "$SSH_HOST" ] || [ -z "$SSH_USER" ] || [ -z "$SSH_PASS" ]; then
+    echo "Error: Failed to parse required connection fields from ${VARS_FILE}"
+    exit 1
+fi
+
+# Execute native interactive OpenSSH tunnel utilizing the in-memory variables
+export SSHPASS="$SSH_PASS"
+sshpass -e ssh -o StrictHostKeyChecking=no -o IdentitiesOnly=yes "${SSH_USER}@${SSH_HOST}"
