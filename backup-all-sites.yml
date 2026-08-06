@@ -1,8 +1,9 @@
 # This playbook can be used to create a backup of the files and database of a website
 # Key steps:
-# - Snapshot the database, placing it in a .tar.gz archive
-# - Append the web files to a folder within the archive, ignoring unreadable files
-# - Compress the archive (gzip)
+# - Snapshot the database.
+# - Stream database and website assets into a single compressed archive on the fly.
+#   - Ignore unreadable files.
+#   - Put web files in their own folder.
 # - Upload it to S3
 
 - name: Grant remote access to machines from which backups are being taken
@@ -46,25 +47,15 @@
       environment:
         MYSQL_PWD: "{{ mysql_pass }}"
 
-    - name: Step 1 - Add database.sql to the root of a raw tar archive
-      ansible.builtin.command: >
-        tar -cf /home/{{ ansible_user }}/ansible-backup-archives/archive.tar
-        -C /home/{{ ansible_user }}/ansible-backup-archives
-        database.sql
-
-    - name: Step 2 - Append website files into a dynamic 'files' subdirectory (skipping permission-locked files)
-      ansible.builtin.command: >
-        tar -rf /home/{{ ansible_user }}/ansible-backup-archives/archive.tar
+    - name: Stream database and website assets into a single compressed archive on the fly
+      ansible.builtin.shell: >
+        tar -czf /home/{{ ansible_user }}/ansible-backup-archives/archive.tar.gz
         --ignore-failed-read
+        -C /home/{{ ansible_user }}/ansible-backup-archives database.sql
         --transform 's|^{{ inventory_hostname }}|files|'
-        -C /home/{{ ansible_user }}
-        {{ inventory_hostname }}
-      register: tar_append_result
-      failed_when: tar_append_result.rc not in [0, 1] # 0 = Success, 1 = Minor, non-fatal anomalies, e.g. "Some files differ" (e.g. from failure to read some files)
-
-    - name: Step 3 - Compress the composite archive directly on the target drive
-      ansible.builtin.command: >
-        gzip -f /home/{{ ansible_user }}/ansible-backup-archives/archive.tar
+        -C /home/{{ ansible_user }} {{ inventory_hostname }}
+      register: tar_result
+      failed_when: tar_result.rc not in [0, 1] # 0 = Success, 1 = Minor, non-fatal anomalies, e.g. "Some files differ" (e.g. from failure to read some files)
 
     - name: Pull unified compressed backup archive back to orchestrator
       ansible.builtin.fetch:
@@ -78,7 +69,7 @@
       delegate_to: localhost
       run_once: true
 
-    - name: Securely upload database to Amazon S3 bucket
+    - name: Securely upload unified archive to Amazon S3 bucket
       amazon.aws.s3_object:
         bucket: "flextalk-backups"
         object: "/{{ inventory_hostname }}/{{ inventory_hostname }}-{{ hostvars['localhost']['ansible_date_time']['date'] }}.tar.gz"
