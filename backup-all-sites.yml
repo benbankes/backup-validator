@@ -1,4 +1,9 @@
 # This playbook can be used to create a backup of the files and database of a website
+# Key steps:
+# - Snapshot the database, placing it in a .tar.gz archive
+# - Append the web files to a folder within the archive, ignoring unreadable files
+# - Compress the archive (gzip)
+# - Upload it to S3
 
 - name: Grant remote access to machines from which backups are being taken
   hosts: all
@@ -6,66 +11,77 @@
   tasks:
     - name: Ensure backup server has credentials to the machine from which the backups are being taken
       ansible.builtin.authorized_key:
-        user: "{{ansible_user}}"
+        user: "{{ ansible_user }}"
         state: present
-        key: "{{ lookup('file', '/home/ubuntu/.ssh/id_rsa.pub') }}"
+        key: "{{ lookup('ansible.builtin.file', '/home/ubuntu/.ssh/id_rsa.pub') }}"
 
 - name: Backup site
   hosts: all
+  gather_facts: false
 
   tasks:
-    - name: Ensure local backup folder does not exist
+    - name: Ensure orchestrator host-isolated download folder is clean
       ansible.builtin.file:
-        path: /home/ben/flextalk-ansible-backups
+        path: "/home/ubuntu/flextalk-ansible-backups/{{ inventory_hostname }}"
         state: absent
       delegate_to: localhost
 
-    - name: Ensure ansible backup folders does not exist
+    - name: Clear old staging directories on target server
       ansible.builtin.file:
-        path: /home/{{ansible_user_id}}/{{item}}
+        path: "/home/{{ ansible_user }}/ansible-backup-archives"
         state: absent
-      loop:
-        - ansible-backup
-        - ansible-backup-archives
 
-    - name: Ensure ansible backup folders exist
+    - name: Create fresh staging directories on target server
       ansible.builtin.file:
-        path: /home/{{ansible_user_id}}/{{item}}
+        path: "/home/{{ ansible_user }}/ansible-backup-archives"
         state: directory
         mode: "0755"
-      loop:
-        - ansible-backup
-        - ansible-backup-archives
 
-    - name: Copy website files to ansible backup folder
-      ansible.builtin.command: cp -r /home/{{ansible_user_id}}/{{inventory_hostname}} /home/{{ansible_user_id}}/ansible-backup/files
-      ignore_errors: yes
-
-    - name: Dump database
+    - name: Generate production database snapshot safely
       ansible.builtin.command: >
-        mysqldump {{mysql_database}}
-        --host={{mysql_host}}
-        --user={{mysql_user}}
-        --result-file=/home/{{ansible_user_id}}/ansible-backup/database.sql
+        mysqldump {{ mysql_database }}
+        --host={{ mysql_host }}
+        --user={{ mysql_user }}
+        --result-file=/home/{{ ansible_user }}/ansible-backup-archives/database.sql
       environment:
-        MYSQL_PWD: "{{mysql_pass}}"
-    
-    - name: Create single file archive of backup
-      ansible.builtin.archive:
-        path: /home/{{ansible_user_id}}/ansible-backup/*
-        dest: /home/{{ansible_user_id}}/ansible-backup-archives/archive.tar.gz
-        format: gz
-    
-    - name: Copy archive back here locally
+        MYSQL_PWD: "{{ mysql_pass }}"
+
+    - name: Step 1 - Add database.sql to the root of a raw tar archive
+      ansible.builtin.command: >
+        tar -cf /home/{{ ansible_user }}/ansible-backup-archives/archive.tar
+        -C /home/{{ ansible_user }}/ansible-backup-archives
+        database.sql
+
+    - name: Step 2 - Append website files into a dynamic 'files' subdirectory (skipping permission-locked files)
+      ansible.builtin.command: >
+        tar -rf /home/{{ ansible_user }}/ansible-backup-archives/archive.tar
+        --ignore-failed-read
+        --transform 's|^{{ inventory_hostname }}|files|'
+        -C /home/{{ ansible_user }}
+        {{ inventory_hostname }}
+      register: tar_append_result
+      failed_when: tar_append_result.rc not in [0, 1] # 0 = Success, 1 = Minor, non-fatal anomalies, e.g. "Some files differ" (e.g. from failure to read some files)
+
+    - name: Step 3 - Compress the composite archive directly on the target drive
+      ansible.builtin.command: >
+        gzip -f /home/{{ ansible_user }}/ansible-backup-archives/archive.tar
+
+    - name: Pull unified compressed backup archive back to orchestrator
       ansible.builtin.fetch:
-        src: /home/{{ansible_user_id}}/ansible-backup-archives/archive.tar.gz
-        dest: /home/ubuntu/flextalk-ansible-backups
+        src: "/home/{{ ansible_user }}/ansible-backup-archives/archive.tar.gz"
+        dest: "/home/ubuntu/flextalk-ansible-backups/{{ inventory_hostname }}/archive.tar.gz"
         flat: true
 
-    - name: Upload archive to S3
+    - name: Collect timestamp facts from orchestrator environment
+      ansible.builtin.setup:
+        filter: "ansible_date_time"
+      delegate_to: localhost
+      run_once: true
+
+    - name: Securely upload database to Amazon S3 bucket
       amazon.aws.s3_object:
-        bucket: flextalk-backups
-        object: /{{inventory_hostname}}/{{inventory_hostname}}-{{hostvars['localhost']['ansible_date_time']['date']}}.tar.gz
-        src: /home/ubuntu/flextalk-ansible-backups/{{inventory_hostname}}/home/{{ansible_user_id}}/ansible-backup-archives/archive.tar.gz
+        bucket: "flextalk-backups"
+        object: "/{{ inventory_hostname }}/{{ inventory_hostname }}-{{ hostvars['localhost']['ansible_date_time']['date'] }}.tar.gz"
+        src: "/home/ubuntu/flextalk-ansible-backups/{{ inventory_hostname }}/archive.tar.gz"
         mode: put
       delegate_to: localhost
