@@ -11,7 +11,7 @@
     subnet_id: "subnet-31b23e3d"
     key_name: "MyEc2KeyPair"
     security_group: "SshSecurityGroup"
-    instance_type: "t3.micro"
+    instance_type: "c6i.large"
     iam_profile: "s3-admin-access"
     tag_name: "backup_creator_tag"
 
@@ -33,7 +33,6 @@
     - name: Provision an EC2 instance
       amazon.aws.ec2_instance:
         region: "{{ aws_region }}"
-        #availability_zone: "{{ aws_zone }}"
         vpc_subnet_id: "{{ subnet_id }}"
         key_name: "{{ key_name }}"
         security_groups: "{{ security_group }}"
@@ -42,12 +41,13 @@
         wait: true
         exact_count: 1
         filters:
-          "tag:Name": "{{ tag_name }}"
-          "instance-state-name": running
+          tag:Name: "{{ tag_name }}"
+          instance-state-name: [running, pending]
         tags:
           Name: "{{ tag_name }}"
-        network:
-          assign_public_ip: true
+        network_interfaces:
+          - device_index: 0
+            assign_public_ip: true
         iam_instance_profile: "{{ iam_profile }}"
         volumes:
           - device_name: /dev/sda1
@@ -55,6 +55,8 @@
               volume_type: gp3
               volume_size: 100
               delete_on_termination: true
+              throughput: 125  # Matches the 12.5 Gbps network pipe of c6i.large
+              iops: 3000       # Prevents disk bottlenecks during processing
       register: ec2_result
 
     - name: Add instance to dynamic in-memory inventory

@@ -11,24 +11,13 @@
   tasks:
     - ansible.builtin.include_tasks: tasks/discover-ip.yml
 
-# Create backup machine at aws with tag
 - name: Destroy backup machine
   hosts: localhost
   connection: local
   gather_facts: false
   tasks:
-    - name: Ensure pip module requirements are installed
-      apt:
-        name: ['python3-pip', 'virtualenv']
-      become: yes
-
-    - name: Ensure boto is installed
-      pip:
-        name: ['boto', 'boto3']
-      become: yes
-
     - name: Get running instances
-      ec2_instance_info:
+      amazon.aws.ec2_instance_info:
         region: us-east-1
         filters:
           "tag:Name": backup_creator_tag
@@ -36,12 +25,8 @@
       register: ec2
 
     - name: Terminate first instance (should only be one)
-      ec2:
+      amazon.aws.ec2_instance:
         region: us-east-1
         state: absent
         instance_ids: "{{[ec2.instances[0].instance_id]}}"
         wait: true
-    
-    - name: Remove terminated host from inventory
-      meta: refresh_inventory
-

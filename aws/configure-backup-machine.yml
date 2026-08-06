@@ -29,7 +29,7 @@
           - ansible
           - sshpass
           - python3-boto3
-          # - expect
+          - awscli
         state: present
       become: true
     - name: Create SSH key pair for the backup orchestrator account
