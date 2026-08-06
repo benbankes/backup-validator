@@ -47,27 +47,30 @@
       environment:
         MYSQL_PWD: "{{ mysql_pass }}"
 
-    - name: Stream database and website assets into a single compressed archive on the fly
-      ansible.builtin.shell: >
-        tar -czf /home/{{ ansible_user }}/ansible-backup-archives/archive.tar.gz
-        --ignore-failed-read
-        -C /home/{{ ansible_user }}/ansible-backup-archives database.sql
-        --transform 's|^{{ inventory_hostname }}|files|'
-        -C /home/{{ ansible_user }} {{ inventory_hostname }}
-      register: tar_result
-      failed_when: tar_result.rc not in [0, 1] # 0 = Success, 1 = Minor, non-fatal anomalies, e.g. "Some files differ" (e.g. from failure to read some files)
+#    - name: Stream database and website assets into a single compressed archive on the fly
+#      ansible.builtin.shell: >
+#        tar -czf /home/{{ ansible_user }}/ansible-backup-archives/archive.tar.gz
+#        --ignore-failed-read
+#        -C /home/{{ ansible_user }}/ansible-backup-archives database.sql
+#        --transform 's|^{{ inventory_hostname }}|files|'
+#        -C /home/{{ ansible_user }} {{ inventory_hostname }}
+#      register: tar_result
+#      failed_when: tar_result.rc not in [0, 1] # 0 = Success, 1 = Minor, non-fatal anomalies, e.g. "Some files differ" (e.g. from failure to read some files)
 
-    - name: Pull unified compressed backup archive back to orchestrator
-      ansible.builtin.fetch:
-        src: "/home/{{ ansible_user }}/ansible-backup-archives/archive.tar.gz"
-        dest: "/home/ubuntu/multi-site-backups/{{ inventory_hostname }}/archive.tar.gz"
-        flat: true
+    # Let's see if this is faster than ansible.builtin.shell (above), which runs at ~600s (10m) for all 4 sites
+    # -B: Runs SCP in batch mode (prevents interactive stalls).
+    # -C: Enables SSH-level compression on the wire for any uncompressed database streams.
+    - name: Stream file down to the orchestrator via native high-speed SCP
+      ansible.builtin.command: >
+        scp -o StrictHostKeyChecking=no -o IdentitiesOnly=yes -B -C
+        {{ ansible_user }}@{{ ansible_host }}:/home/{{ ansible_user }}/ansible-backup-archives/archive.tar.gz
+        /home/ubuntu/multi-site-backups/{{ inventory_hostname }}/archive.tar.gz
+      delegate_to: localhost
 
-    - name: Securely upload unified archive to Amazon S3 bucket
-      amazon.aws.s3_object:
-        bucket: "flextalk-backups"
-        # Uses a local pipeline command lookup to insert the date cleanly
-        object: "/{{ inventory_hostname }}/{{ inventory_hostname }}-{{ lookup('ansible.builtin.pipe', 'date +%Y-%m-%d') }}.tar.gz"
-        src: "/home/ubuntu/multi-site-backups/{{ inventory_hostname }}/archive.tar.gz"
-        mode: put
+    # Let's see if this is faster than amazon.aws.s3_bucket (replaced), which ran at 300s (5m)
+    - name: High-speed multi-threaded upload archive to Amazon S3
+      ansible.builtin.command: >
+        aws s3 cp 
+        /home/ubuntu/multi-site-backups/{{ inventory_hostname }}/archive.tar.gz
+        s3://flextalk-backups/{{ inventory_hostname }}/{{ inventory_hostname }}-{{ lookup('ansible.builtin.pipe', 'date +%Y-%m-%d') }}.tar.gz
       delegate_to: localhost
