@@ -23,7 +23,7 @@
   tasks:
     - name: Ensure orchestrator host-isolated download folder is clean
       ansible.builtin.file:
-        path: "/home/ubuntu/flextalk-ansible-backups/{{ inventory_hostname }}"
+        path: "/home/ubuntu/multi-site-backups/{{ inventory_hostname }}"
         state: absent
       delegate_to: localhost
 
@@ -60,7 +60,7 @@
     - name: Pull unified compressed backup archive back to orchestrator
       ansible.builtin.fetch:
         src: "/home/{{ ansible_user }}/ansible-backup-archives/archive.tar.gz"
-        dest: "/home/ubuntu/flextalk-ansible-backups/{{ inventory_hostname }}/archive.tar.gz"
+        dest: "/home/ubuntu/multi-site-backups/{{ inventory_hostname }}/archive.tar.gz"
         flat: true
 
     - name: Collect timestamp facts from orchestrator environment
@@ -73,6 +73,6 @@
       amazon.aws.s3_object:
         bucket: "flextalk-backups"
         object: "/{{ inventory_hostname }}/{{ inventory_hostname }}-{{ hostvars['localhost']['ansible_date_time']['date'] }}.tar.gz"
-        src: "/home/ubuntu/flextalk-ansible-backups/{{ inventory_hostname }}/archive.tar.gz"
+        src: "/home/ubuntu/multi-site-backups/{{ inventory_hostname }}/archive.tar.gz"
         mode: put
       delegate_to: localhost
