@@ -1,0 +1,15 @@
+# Installs dependencies for ansible-ssh, our custom way to ergonomically connect ot a server being backed up
+
+- name: Install python3 requirements
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: yes
+
+  tasks:
+    - name: Ensure modern dependencies exist for local cloud uploads
+      ansible.builtin.apt:
+        name:
+          - sshpass
+        state: present
+      become: true
