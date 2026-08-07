@@ -49,7 +49,7 @@
 
     - name: Stream database and website assets into a single compressed archive on the fly
       ansible.builtin.shell: >
-        tar -czf /home/{{ ansible_user }}/ansible-backup-archives/archive.tar.gz
+        GZIP="-1" tar -czf /home/{{ ansible_user }}/ansible-backup-archives/archive.tar.gz
         --ignore-failed-read
         -C /home/{{ ansible_user }}/ansible-backup-archives database.sql
         --transform 's|^{{ inventory_hostname }}|files|'
