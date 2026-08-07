@@ -57,6 +57,13 @@
       register: tar_result
       failed_when: tar_result.rc not in [0, 1] # 0 = Success, 1 = Minor, non-fatal anomalies, e.g. "Some files differ" (e.g. from failure to read some files)
 
+    - name: Ensure orchestrator host-isolated download folder exists
+      ansible.builtin.file:
+        path: "/home/ubuntu/multi-site-backups/{{ inventory_hostname }}"
+        state: directory
+        mode: "0755"
+      delegate_to: localhost
+
     # Let's see if this is faster than ansible.builtin.fetch (replaced), which runs at ~600s (10m) for all 4 sites
     # -B: Runs SCP in batch mode (prevents interactive stalls).
     # -C: Enables SSH-level compression on the wire for any uncompressed database streams.
