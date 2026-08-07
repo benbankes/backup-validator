@@ -1,0 +1,32 @@
+---
+- name: Verify hosted files are for the live site
+  hosts: all
+  gather_facts: false
+
+  tasks:
+    - name: Generate a unique challenge token identifier
+      ansible.builtin.set_fact:
+        backup_challenge_id: "{{ lookup('community.general.random_string', length=32) }}"
+
+    - name: Drop the validation challenge file into the website root
+      ansible.builtin.copy:
+        content: "{{ backup_challenge_id }}"
+        dest: "/home/{{ ansible_user }}/{{ inventory_hostname }}/backup-verification-challenge.txt"
+        mode: "0644"
+
+    - name: Query the live public website for the verification challenge file
+      ansible.builtin.uri:
+        url: "https://{{ inventory_hostname }}/backup-verification-challenge.txt"
+        return_content: true
+        status_code: 200
+        validate_certs: true
+        timeout: 15
+      register: live_web_challenge
+      delegate_to: localhost
+      failed_when:
+        - live_web_challenge.status != 200 or live_web_challenge.content != backup_challenge_id
+
+    - name: Remove the temporary validation challenge file from production server
+      ansible.builtin.file:
+        path: "/home/{{ ansible_user }}/{{ inventory_hostname }}/backup-verification-challenge.txt"
+        state: absent
