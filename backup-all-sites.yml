@@ -21,12 +21,6 @@
   gather_facts: false
 
   tasks:
-    - name: Ensure orchestrator host-isolated download folder is clean
-      ansible.builtin.file:
-        path: "/home/ubuntu/multi-site-backups/{{ inventory_hostname }}"
-        state: absent
-      delegate_to: localhost
-
     - name: Clear old staging directories on target server
       ansible.builtin.file:
         path: "/home/{{ ansible_user }}/ansible-backup-archives"
@@ -56,13 +50,6 @@
         -C /home/{{ ansible_user }} {{ inventory_hostname }}
       register: tar_result
       failed_when: tar_result.rc not in [0, 1] # 0 = Success, 1 = Minor, non-fatal anomalies, e.g. "Some files differ" (e.g. from failure to read some files)
-
-    - name: Ensure orchestrator host-isolated download folder exists
-      ansible.builtin.file:
-        path: "/home/ubuntu/multi-site-backups/{{ inventory_hostname }}"
-        state: directory
-        mode: "0755"
-      delegate_to: localhost
 
     # Leverage the orchestrator to pipe/stream the archive directly from the production host to S3
     - name: Pipe archive download directly into Amazon S3 simultaneously
