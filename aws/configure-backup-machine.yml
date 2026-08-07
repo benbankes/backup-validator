@@ -39,9 +39,3 @@
         ssh_key_bits: 4096
         ssh_key_type: rsa
       become: true
-    - name: Optimize AWS CLI upload engine for maximum parallel throughput
-      ansible.builtin.shell: |
-        aws configure set default.s3.max_concurrent_requests 32
-        aws configure set default.s3.multipart_chunksize 32MB
-        aws configure set default.s3.multipart_threshold 64MB
-      # Executes directly inside the orchestrator environment
