@@ -1,0 +1,31 @@
+# Run this as a pre-requisite to running codex within a WSL distro
+# Both of the following commands need to be run inside the WSL distro.
+# Get in the WSL distro & the working directory
+# > wsl -d Ubuntu-26.04-Backup-Validator
+# > cd ~/backup-validator
+# The two commands
+# > ansible-playbook install-codex.yml
+# > codex .
+#
+# Alternatively, run codex via VSCode.
+# The desktop app for Codex has some issues running in WSL.
+
+- name: Install Node.js, NPM, and OpenAI Codex CLI inside Ubuntu
+  hosts: localhost
+  gather_facts: false
+  become: true
+
+  tasks:
+    - name: Update apt cache and install native Node.js and NPM
+      ansible.builtin.apt:
+        name:
+          - nodejs
+          - npm
+        state: present
+        update_cache: true
+
+    - name: Install @openai/codex package globally inside Linux
+      ansible.builtin.npm:
+        name: "@openai/codex"
+        global: true
+        state: present
