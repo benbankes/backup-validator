@@ -1,0 +1,47 @@
+site: {{ restore_site | to_json }}
+local_url: {{ local_origin | to_json }}
+selected_archive: {{ backup_archive | to_json }}
+overall: {{ (validation_passed | bool) | ternary('pass', 'fail') | to_json }}
+declared:
+  php: {{ php_version | to_json }}
+  mysql: {{ db_engine_version | to_json }}
+  wordpress: {{ wp_version | to_json }}
+  http_server: {{ (http_server_name ~ '/' ~ http_server_version) | to_json }}
+detected:
+  php: {{ actual_php.stdout | default('') | trim | to_json }}
+  mysql: {{ actual_mysql.stdout | default('') | trim | to_json }}
+  wordpress: {{ actual_wordpress.stdout | default('') | trim | to_json }}
+  http_server: {{ ((actual_http_server.stdout | default('')) ~ ' ' ~ (actual_http_server.stderr | default(''))) | trim | to_json }}
+resolved_images: {{ resolved_images.stdout | default('') | to_json }}
+database_origins:
+  before_home: {{ old_home.stdout | trim | to_json }}
+  before_siteurl: {{ old_siteurl.stdout | trim | to_json }}
+  after_home: {{ converted_home.stdout | default('') | trim | to_json }}
+  after_siteurl: {{ converted_siteurl.stdout | default('') | trim | to_json }}
+checks:
+{% for result in wp_checks.results %}
+  - command: {{ (result.item | join(' ')) | to_json }}
+    status: {{ (result.rc == 0) | ternary('pass', 'fail') | to_json }}
+    output: {{ ((result.stdout | default('')) ~ ' ' ~ (result.stderr | default(''))) | trim | to_json }}
+{% endfor %}
+  - command: native MySQL table check
+    status: {{ (native_db_check.rc == 0) | ternary('pass', 'fail') | to_json }}
+  - command: homepage HTTP request
+    status: {{ (homepage_check.status | default(0) == 200) | ternary('pass', 'fail') | to_json }}
+    http_status: {{ homepage_check.status | default(0) }}
+  - command: wp-admin HTTP request
+    status: {{ (admin_check.status | default(0) in [200, 401, 403, 404]) | ternary('pass', 'fail') | to_json }}
+    http_status: {{ admin_check.status | default(0) }}
+  - command: restored login endpoint request
+    status: {{ (login_check.status | default(0) == 200) | ternary('pass', 'fail') | to_json }}
+    http_status: {{ login_check.status | default(0) }}
+    custom_login_detected: {{ (hidden_login_option.rc == 0) | bool | to_json }}
+  - command: sampled media request
+    status: {{ ((uploads.matched | default(0) | int == 0) or (media_check.status | default(0) in [200, 206])) | ternary('pass', 'fail') | to_json }}
+    note: {{ ((uploads.matched | default(0) | int == 0) | ternary('No sampled upload was present', 'Sampled one recovered upload')) | to_json }}
+  - command: remaining production-origin scan
+    status: {{ (remaining_origin.rc == 0 and remaining_origin.stdout | trim == '0') | ternary('pass', 'fail') | to_json }}
+    remaining_replacements: {{ remaining_origin.stdout | default('') | trim | to_json }}
+artifacts:
+  container_logs: containers.log
+  compose_file: compose.yml

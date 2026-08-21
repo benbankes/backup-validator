@@ -1,0 +1,16 @@
+server {
+    listen 80;
+    server_name {{ local_hostname }};
+    root /var/www/html;
+    index index.php index.html;
+    client_max_body_size 256m;
+    location / { try_files $uri $uri/ /index.php?$args; }
+    location ~ \.php$ {
+        try_files $uri =404;
+        include fastcgi_params;
+        fastcgi_param SCRIPT_FILENAME $document_root$fastcgi_script_name;
+        fastcgi_param HTTP_PROXY "";
+        fastcgi_pass php:9000;
+    }
+    location ~* /(?:uploads|files)/.*\.php$ { deny all; }
+}

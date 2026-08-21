@@ -1,112 +1,604 @@
-# This playbook can be used to revive a website locally
-# This playbook should not be used to recover a live site in production
-# This playbook assumes the following file structur for archive.tar.gz
-# - database.sql
-# - files directory containing all wp files
-# This playbook assumes
-# - Ubuntu 18.04
-#   - Apache 2.4
-#   - PHP 7.2
-#   - MySQL 5.7
-
-- name: Test
+---
+- name: Restore a WordPress backup into an isolated local Docker environment
   hosts: localhost
-  vars_files:
-    - vars/mysql.yml
-  roles:
-    - role: geerlingguy.mysql # Uses mysql_root_password
-      become: yes
+  connection: local
+  gather_facts: false
+
+  vars:
+    restore_root: "{{ playbook_dir }}/.restore"
+    site_dir: "{{ restore_root }}/{{ restore_site }}"
+    proxy_dir: "{{ restore_root }}/proxy"
+    proxy_compose_file: "{{ proxy_dir }}/compose.yml"
+    proxy_network_name: wp-local-proxy
+    restore_slug: "{{ restore_site | regex_replace('[^A-Za-z0-9]+', '-') | lower }}"
+    local_hostname: "{{ restore_site | regex_replace('\\.[^.]+$', '.test') }}"
+    site_project: "wp-local-{{ restore_slug }}"
+    site_compose_file: "{{ site_dir }}/compose.yml"
+    route_file: "{{ proxy_dir }}/conf.d/{{ restore_slug }}.conf"
+    host_marker: "wp-local-restore:{{ restore_site }}"
+    effective_http_port: "{{ restore_http_port | default(80) | int }}"
+    local_http_host: "{{ local_hostname }}{{ (effective_http_port | int == 80) | ternary('', ':' ~ effective_http_port) }}"
+    local_origin: "http://{{ local_hostname }}{{ (effective_http_port | int == 80) | ternary('', ':' ~ effective_http_port) }}"
+
+  pre_tasks:
+    - name: Require the public restore inputs
+      ansible.builtin.assert:
+        that:
+          - restore_site is defined
+          - restore_site | length > 0
+          - restore_site in groups['all']
+          - backup_archive is defined
+          - backup_archive | length > 0
+          - backup_archive is abs
+          - effective_http_port | int >= 1
+          - effective_http_port | int <= 65535
+        fail_msg: restore_site and an absolute backup_archive path are required.
+
+    - name: Load the selected site's verified environment declarations
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/host_vars/{{ restore_site }}.yml"
+
+    - name: Validate the selected environment declarations
+      ansible.builtin.assert:
+        that:
+          - php_version is defined and php_version | type_debug == 'str' and php_version | length > 0
+          - db_engine_version is defined and db_engine_version | type_debug == 'str' and db_engine_version | length > 0
+          - wp_version is defined and wp_version | type_debug == 'str' and wp_version | length > 0
+          - http_server_name | lower in ['apache', 'nginx']
+          - http_server_version is defined and http_server_version | type_debug == 'str' and http_server_version | length > 0
+          - php_version is regex('^[0-9]+(\\.[0-9]+){1,2}$')
+          - db_engine_version is regex('^[0-9]+(\\.[0-9]+){1,2}$')
+          - wp_version is regex('^[0-9]+(\\.[0-9]+){1,2}$')
+          - http_server_version is regex('^[0-9]+(\\.[0-9]+){1,2}$')
+          - db_engine_version is regex('^8\\.0([.-]|$)')
+        fail_msg: >-
+          Local restore requires quoted version declarations, apache or nginx,
+          and the supported MySQL 8.0 image family.
+
+    - name: Check the selected archive
+      ansible.builtin.stat:
+        path: "{{ backup_archive }}"
+      register: backup_stat
+
+    - name: Require a readable regular archive file
+      ansible.builtin.assert:
+        that:
+          - backup_stat.stat.exists
+          - backup_stat.stat.isreg
+          - backup_stat.stat.readable
+
+    - name: Verify Docker daemon access
+      ansible.builtin.command:
+        argv: [docker, info]
+      changed_when: false
+
+    - name: Verify Docker Compose access
+      ansible.builtin.command:
+        argv: [docker, compose, version]
+      changed_when: false
+
+    - name: Check whether the managed proxy is already running
+      ansible.builtin.command:
+        argv: [docker, ps, --filter, name=wp-local-proxy-gateway, --format, "{{ '{{' }}.ID{{ '}}' }}"]
+      register: proxy_running
+      changed_when: false
+
+    - name: Detect an unmanaged listener on the selected local port
+      ansible.builtin.shell: |
+        set -o pipefail
+        ss -H -ltn 'sport = :{{ effective_http_port }}' || true
+      args:
+        executable: /bin/bash
+      register: port_80_listener
+      changed_when: false
+      when: proxy_running.stdout | trim == ''
+
+    - name: Require the selected local port to be available
+      ansible.builtin.assert:
+        that: port_80_listener.stdout | default('') | trim == ''
+        fail_msg: "Local port {{ effective_http_port }} is already occupied by an unmanaged process."
+      when: proxy_running.stdout | trim == ''
 
   tasks:
-    - set_fact:
-        hostname: flextalk.org
-    - name: Ensure an unpacking directory exists
-      file:
-        path: /var/www-tmp
+    - name: List archive members without extracting
+      ansible.builtin.command:
+        argv: [tar, -tzf, "{{ backup_archive }}"]
+      register: archive_members
+      changed_when: false
+
+    - name: Reject unsafe archive paths
+      ansible.builtin.assert:
+        that:
+          - archive_members.stdout_lines | select('match', '^/') | list | length == 0
+          - archive_members.stdout_lines | select('search', '(^|/)\\.\\.(/|$)') | list | length == 0
+        fail_msg: The archive contains an absolute path or parent-directory traversal.
+
+    - name: Reject unsafe archive links and special files
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import pathlib
+            import sys
+            import tarfile
+
+            archive = sys.argv[1]
+            with tarfile.open(archive, "r:gz") as source:
+                for member in source.getmembers():
+                    name = pathlib.PurePosixPath(member.name)
+                    if name.is_absolute() or ".." in name.parts:
+                        raise SystemExit(f"unsafe archive path: {member.name}")
+                    if member.isdev() or member.isfifo():
+                        raise SystemExit(f"unsupported special file: {member.name}")
+                    if member.issym() or member.islnk():
+                        target = pathlib.PurePosixPath(member.linkname)
+                        combined = name.parent / target
+                        if target.is_absolute() or ".." in combined.parts:
+                            raise SystemExit(
+                                f"unsafe archive link: {member.name} -> {member.linkname}"
+                            )
+          - "{{ backup_archive }}"
+      changed_when: false
+
+    - name: Remove a previous route for this site
+      ansible.builtin.file:
+        path: "{{ route_file }}"
+        state: absent
+
+    - name: Detect an existing site Compose definition
+      ansible.builtin.stat:
+        path: "{{ site_compose_file }}"
+      register: old_compose
+
+    - name: Remove the previous site's containers and database volume
+      ansible.builtin.command:
+        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", down, --volumes, --remove-orphans]
+      when: old_compose.stat.exists
+      changed_when: true
+
+    - name: Remove the previous per-site workspace
+      ansible.builtin.file:
+        path: "{{ site_dir }}"
+        state: absent
+      become: true
+
+    - name: Create a fresh per-site workspace
+      ansible.builtin.file:
+        path: "{{ site_dir }}"
         state: directory
-        owner: ben
-      become: yes
-    - name: Unarchive backup blob
-      unarchive:
-        src: archive.tar.gz
-        dest: /var/www-tmp
-    - shell: cat /var/www-tmp/files/wp-config.php | grep DB_NAME | cut -d \' -f 4
-      register: results
-      changed_when: no
-    - set_fact:
-        db_name: "{{ results.stdout }}"
-    - shell: cat /var/www-tmp/files/wp-config.php | grep DB_USER | cut -d \' -f 4
-      register: results
-      changed_when: no
-    - set_fact:
-        db_user: "{{ results.stdout }}"
-    - shell: cat /var/www-tmp/files/wp-config.php | grep DB_PASSWORD | cut -d \' -f 4
-      register: results
-      changed_when: no
-    - set_fact:
-        db_password: "{{ results.stdout }}"
-    - mysql_db:
-        login_user: root
-        login_password: "{{mysql_root_password}}"
-        name: "{{db_name}}"
-        state: import
-        target: /var/www-tmp/database.sql
-    - mysql_user:
-        login_user: root
-        login_password: "{{mysql_root_password}}"
-        name: "{{db_user}}"
-        password: "{{db_password}}"
-        priv: "{{db_name}}.*:ALL"
-    - apt: name=apache2
-      notify: restart apache
-      become: yes
-    - service: name=apache2 enabled=yes
-      become: yes
-    - name: add static, local dns entry
-      lineinfile:
-        dest: /etc/hosts
-        regexp: ".*{{hostname}}"
-        line: 127.0.0.1 {{hostname}} www.{{hostname}}
-        backup: yes
-      become: yes
-    - file:
-        src: /etc/apache2/sites-available/{{hostname}}.conf
-        dest: /etc/apache2/sites-enabled/{{hostname}}.conf
-        state: link
-        backup: yes
-      notify: restart apache
-      become: yes
-    - apache2_module: name={{item}}
-      become: yes
-      notify: restart apache
-      with_items:
-        - rewrite
-        - ssl
-    - template:
-        src: "{{hostname}}.conf.j2"
-        dest: /etc/apache2/sites-available/{{hostname}}.conf
-        backup: yes
-      become: yes
-      notify: restart apache
-    - apt: name={{item}}
-      with_items:
-        - php
-        - php-common
-        - php-mysqlnd
-      become: yes
-    - ini_file:
-        dest: /etc/php.ini
-        section: Date
-        option: date.timezone
-        value: UTC
-        backup: yes
-      become: yes
-    - lineinfile:
-        dest: /var/www-tmp/files/wp-config.php
-        regexp: DB_HOST
-        line: define('DB_HOST', localhost);
-      backup: yes
-  handlers:
-    - name: restart apache
-      service: name=apache2 state=restarted
-      become: yes
+        mode: "0755"
+
+    - name: Extract the selected backup
+      ansible.builtin.unarchive:
+        src: "{{ backup_archive }}"
+        dest: "{{ site_dir }}"
+        remote_src: true
+
+    - name: Inspect required recovered files
+      ansible.builtin.stat:
+        path: "{{ item }}"
+      loop:
+        - "{{ site_dir }}/database.sql"
+        - "{{ site_dir }}/files/wp-config.php"
+        - "{{ site_dir }}/files/wp-includes/version.php"
+        - "{{ site_dir }}/files/wp-settings.php"
+      register: recovered_paths
+
+    - name: Require the documented backup structure and WordPress tree
+      ansible.builtin.assert:
+        that:
+          - recovered_paths.results | map(attribute='stat.exists') | min
+        fail_msg: The archive must contain database.sql and a complete files/ WordPress tree.
+
+    - name: Read the recovered WordPress version
+      ansible.builtin.shell: |
+        set -o pipefail
+        awk -F"'" '/\$wp_version[[:space:]]*=/{print $2; exit}' "{{ site_dir }}/files/wp-includes/version.php"
+      args:
+        executable: /bin/bash
+      register: recovered_wp_version_command
+      changed_when: false
+
+    - name: Record the recovered WordPress version
+      ansible.builtin.set_fact:
+        recovered_wp_version: "{{ recovered_wp_version_command.stdout | trim }}"
+
+    - name: Require the recovered WordPress version to match host_vars
+      ansible.builtin.assert:
+        that:
+          - recovered_wp_version is regex('^' ~ (wp_version | regex_escape) ~ '([.-]|$)')
+        fail_msg: >-
+          Recovered WordPress {{ recovered_wp_version }} does not match declared
+          version family {{ wp_version }}.
+
+    - name: Generate fresh local-only database credentials
+      ansible.builtin.set_fact:
+        local_db_name: "wp_{{ restore_slug | replace('-', '_') }}"
+        local_db_user: wp_local
+        local_db_password: "{{ lookup('ansible.builtin.password', '/dev/null', length=32, chars=['ascii_letters', 'digits']) }}"
+        local_db_root_password: "{{ lookup('ansible.builtin.password', '/dev/null', length=32, chars=['ascii_letters', 'digits']) }}"
+      no_log: true
+
+    - name: Create shared proxy directories
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0755"
+      loop:
+        - "{{ proxy_dir }}"
+        - "{{ proxy_dir }}/conf.d"
+
+    - name: Render shared proxy configuration
+      ansible.builtin.template:
+        src: "{{ item.src }}"
+        dest: "{{ item.dest }}"
+        mode: "0644"
+      loop:
+        - { src: wp-local-proxy-compose.yml.j2, dest: "{{ proxy_compose_file }}" }
+        - { src: wp-local-proxy-default.conf.j2, dest: "{{ proxy_dir }}/conf.d/00-default.conf" }
+
+    - name: Start the shared local proxy and create its internal network
+      ansible.builtin.command:
+        argv: [docker, compose, --project-name, wp-local-proxy, --file, "{{ proxy_compose_file }}", up, --detach]
+      changed_when: true
+
+    - name: Write the local credential environment file
+      ansible.builtin.template:
+        src: wp-local-env.j2
+        dest: "{{ site_dir }}/.env"
+        mode: "0600"
+      no_log: true
+
+    - name: Render the site Compose definition
+      ansible.builtin.template:
+        src: wp-local-site-compose.yml.j2
+        dest: "{{ site_compose_file }}"
+        mode: "0644"
+
+    - name: Render nginx site configuration when required
+      ansible.builtin.template:
+        src: wp-local-site-nginx.conf.j2
+        dest: "{{ site_dir }}/nginx.conf"
+        mode: "0644"
+      when: http_server_name | lower == 'nginx'
+
+    - name: Start the fresh MySQL database and import the dump
+      ansible.builtin.command:
+        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", up, --detach, db]
+      changed_when: true
+
+    - name: Wait for MySQL initialization and import to complete
+      ansible.builtin.command:
+        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", exec, -T, db, mysqladmin, ping, --host=127.0.0.1, --user=root, "--password={{ local_db_root_password }}"]
+      register: mysql_ready
+      retries: 60
+      delay: 5
+      until: mysql_ready.rc == 0
+      changed_when: false
+      no_log: true
+
+    - name: Apply local database and safety constants to recovered wp-config.php
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --project-name
+          - "{{ site_project }}"
+          - --file
+          - "{{ site_compose_file }}"
+          - run
+          - --rm
+          - --no-deps
+          - --user
+          - "0:0"
+          - wpcli
+          - wp
+          - config
+          - set
+          - "{{ item.name }}"
+          - "{{ item.value }}"
+          - --type=constant
+          - --allow-root
+          - "{{ item.raw | ternary('--raw', '--quiet') }}"
+      loop:
+        - { name: DB_HOST, value: "db:3306", raw: false }
+        - { name: DB_NAME, value: "{{ local_db_name }}", raw: false }
+        - { name: DB_USER, value: "{{ local_db_user }}", raw: false }
+        - { name: DB_PASSWORD, value: "{{ local_db_password }}", raw: false }
+        - { name: WP_ENVIRONMENT_TYPE, value: local, raw: false }
+        - { name: DISABLE_WP_CRON, value: "true", raw: true }
+      no_log: true
+
+    - name: Give the web runtime ownership of the recovered working copy
+      ansible.builtin.command:
+        argv: [docker, run, --rm, --volume, "{{ site_dir }}/files:/var/www/html", "wordpress:{{ wp_version }}-php{{ php_version }}-{{ (http_server_name | lower == 'nginx') | ternary('fpm', 'apache') }}", chown, -R, "33:33", /var/www/html]
+      changed_when: true
+
+    - name: Read the production home URL from the restored database
+      ansible.builtin.command:
+        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", run, --rm, wpcli, wp, option, get, home, --skip-plugins, --skip-themes]
+      register: old_home
+      changed_when: false
+
+    - name: Read the production site URL from the restored database
+      ansible.builtin.command:
+        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", run, --rm, wpcli, wp, option, get, siteurl, --skip-plugins, --skip-themes]
+      register: old_siteurl
+      changed_when: false
+
+    - name: Detect WordPress multisite
+      ansible.builtin.command:
+        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", run, --rm, wpcli, wp, config, get, MULTISITE, --type=constant]
+      register: multisite_setting
+      changed_when: false
+      failed_when: false
+
+    - name: Convert production origins to the local test origin safely
+      ansible.builtin.command:
+        argv: >-
+          {{
+            ['docker', 'compose', '--project-name', site_project, '--file', site_compose_file,
+             'run', '--rm', 'wpcli', 'wp', 'search-replace', item, local_origin,
+             '--all-tables-with-prefix', '--skip-columns=guid', '--skip-plugins', '--skip-themes']
+            + (['--network'] if (multisite_setting.rc == 0 and multisite_setting.stdout | trim | lower in ['1', 'true']) else [])
+          }}
+      loop: "{{ [old_home.stdout | trim, old_siteurl.stdout | trim] | unique | list }}"
+      when: item != local_origin
+      changed_when: true
+
+    - name: Start the recovered WordPress application
+      ansible.builtin.command:
+        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", up, --detach]
+      changed_when: true
+
+    - name: Wait for the site's web frontend inside Docker
+      ansible.builtin.command:
+        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", exec, -T, web, "{{ (http_server_name | lower == 'nginx') | ternary('nginx', 'apache2') }}", "{{ (http_server_name | lower == 'nginx') | ternary('-t', '-v') }}"]
+      register: web_ready
+      retries: 20
+      delay: 3
+      until: web_ready.rc == 0
+      changed_when: false
+
+    - name: Publish the site's host-based proxy route
+      ansible.builtin.template:
+        src: wp-local-proxy-route.conf.j2
+        dest: "{{ route_file }}"
+        mode: "0644"
+
+    - name: Validate and reload the shared proxy configuration
+      ansible.builtin.command:
+        argv: [docker, exec, wp-local-proxy-gateway, nginx, -t]
+      changed_when: false
+
+    - name: Reload the shared proxy
+      ansible.builtin.command:
+        argv: [docker, exec, wp-local-proxy-gateway, nginx, -s, reload]
+      changed_when: true
+
+    - name: Add a marked WSL hosts entry for the local domain
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: "# {{ host_marker | regex_escape }}$"
+        line: "127.0.0.1 {{ local_hostname }} # {{ host_marker }}"
+        state: present
+      become: true
+
+    - name: Read actual PHP version
+      ansible.builtin.command:
+        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", exec, -T, "{{ (http_server_name | lower == 'nginx') | ternary('php', 'web') }}", php, -r, "echo PHP_VERSION;"]
+      register: actual_php
+      changed_when: false
+      failed_when: false
+
+    - name: Read actual MySQL version
+      ansible.builtin.command:
+        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", exec, -T, db, mysql, --batch, --skip-column-names, --user=root, "--password={{ local_db_root_password }}", -e, "SELECT VERSION();"]
+      register: actual_mysql
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: Read actual WordPress version
+      ansible.builtin.command:
+        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", run, --rm, wpcli, wp, core, version, --skip-plugins, --skip-themes]
+      register: actual_wordpress
+      changed_when: false
+      failed_when: false
+
+    - name: Read actual HTTP server version
+      ansible.builtin.command:
+        argv: >-
+          {{
+            ['docker', 'compose', '--project-name', site_project, '--file', site_compose_file,
+             'exec', '-T', 'web']
+            + (['nginx', '-v'] if http_server_name | lower == 'nginx' else ['apache2', '-v'])
+          }}
+      register: actual_http_server
+      changed_when: false
+      failed_when: false
+
+    - name: Run WP-CLI recovery checks
+      ansible.builtin.command:
+        argv: "{{ ['docker', 'compose', '--project-name', site_project, '--file', site_compose_file, 'run', '--rm', 'wpcli', 'wp'] + item }}"
+      loop:
+        - [core, is-installed, --skip-plugins, --skip-themes]
+        - [plugin, list, --skip-plugins, --skip-themes, --format=count]
+        - [theme, list, --skip-plugins, --skip-themes, --format=count]
+        - [core, verify-checksums, --skip-plugins, --skip-themes]
+      register: wp_checks
+      changed_when: false
+      failed_when: false
+
+    - name: Check restored tables with MySQL's native client
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --project-name
+          - "{{ site_project }}"
+          - --file
+          - "{{ site_compose_file }}"
+          - exec
+          - -T
+          - db
+          - sh
+          - -ec
+          - |
+            mysql --batch --skip-column-names \
+              --user="$MYSQL_USER" --password="$MYSQL_PASSWORD" "$MYSQL_DATABASE" \
+              -e "SELECT CONCAT('CHECK TABLE \`', REPLACE(TABLE_NAME, '\`', '\`\`'), '\`;')
+                  FROM information_schema.TABLES
+                  WHERE TABLE_SCHEMA = DATABASE() AND TABLE_TYPE = 'BASE TABLE'" |
+            mysql --batch --skip-column-names \
+              --user="$MYSQL_USER" --password="$MYSQL_PASSWORD" "$MYSQL_DATABASE"
+      register: native_db_check
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: Confirm converted home URL
+      ansible.builtin.command:
+        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", run, --rm, wpcli, wp, option, get, home, --skip-plugins, --skip-themes]
+      register: converted_home
+      changed_when: false
+      failed_when: false
+
+    - name: Confirm converted site URL
+      ansible.builtin.command:
+        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", run, --rm, wpcli, wp, option, get, siteurl, --skip-plugins, --skip-themes]
+      register: converted_siteurl
+      changed_when: false
+      failed_when: false
+
+    - name: Look for remaining production home references
+      ansible.builtin.command:
+        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", run, --rm, wpcli, wp, search-replace, "{{ old_home.stdout | trim }}", "{{ local_origin }}", --all-tables-with-prefix, --skip-columns=guid, --skip-plugins, --skip-themes, --dry-run, --format=count]
+      register: remaining_origin
+      changed_when: false
+      failed_when: false
+
+    - name: Request the restored homepage through the shared proxy
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ effective_http_port }}/"
+        headers: { Host: "{{ local_http_host }}" }
+        follow_redirects: all
+        return_content: true
+        status_code: [200]
+      register: homepage_check
+      failed_when: false
+
+    - name: Request wp-admin through the shared proxy
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ effective_http_port }}/wp-admin/"
+        headers: { Host: "{{ local_http_host }}" }
+        follow_redirects: all
+        return_content: true
+        status_code: [200, 401, 403]
+      register: admin_check
+      failed_when: false
+
+    - name: Detect a restored custom login path
+      ansible.builtin.command:
+        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", run, --rm, wpcli, wp, option, get, whl_page, --skip-plugins, --skip-themes]
+      register: hidden_login_option
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: Select the restored login path
+      ansible.builtin.set_fact:
+        restored_login_path: >-
+          {{
+            hidden_login_option.stdout | trim
+            if hidden_login_option.rc == 0 and hidden_login_option.stdout | trim | length > 0
+            else 'wp-login.php'
+          }}
+      no_log: true
+
+    - name: Request the restored login endpoint through the shared proxy
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ effective_http_port }}/{{ restored_login_path | regex_replace('^/', '') }}"
+        headers: { Host: "{{ local_http_host }}" }
+        follow_redirects: all
+        return_content: true
+        status_code: [200]
+      register: login_check
+      failed_when: false
+      no_log: true
+
+    - name: Find recovered uploads
+      ansible.builtin.find:
+        paths: "{{ site_dir }}/files/wp-content/uploads"
+        file_type: file
+        recurse: true
+        patterns: ["*.jpg", "*.jpeg", "*.png", "*.gif", "*.webp", "*.pdf"]
+      register: uploads
+      failed_when: false
+
+    - name: Sample one recovered media URL
+      ansible.builtin.uri:
+        url: "http://127.0.0.1:{{ effective_http_port }}/wp-content/uploads/{{ uploads.files[0].path | regex_replace('^.*/wp-content/uploads/', '') }}"
+        headers: { Host: "{{ local_http_host }}" }
+        status_code: [200, 206]
+      register: media_check
+      failed_when: false
+      when: uploads.matched | default(0) | int > 0
+
+    - name: Capture application container logs
+      ansible.builtin.command:
+        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", logs, --no-color]
+      register: application_logs
+      changed_when: false
+      failed_when: false
+
+    - name: Record resolved container images
+      ansible.builtin.command:
+        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", images, --format, json]
+      register: resolved_images
+      changed_when: false
+      failed_when: false
+
+    - name: Save application logs
+      ansible.builtin.copy:
+        content: "{{ application_logs.stdout }}\n{{ application_logs.stderr }}"
+        dest: "{{ site_dir }}/containers.log"
+        mode: "0644"
+
+    - name: Calculate overall validation status
+      ansible.builtin.set_fact:
+        validation_passed: >-
+          {{
+            actual_php.rc == 0 and actual_php.stdout is regex('^' ~ (php_version | regex_escape) ~ '([.-]|$)') and
+            actual_mysql.rc == 0 and actual_mysql.stdout is regex('^' ~ (db_engine_version | regex_escape) ~ '([.-]|$)') and
+            actual_wordpress.rc == 0 and actual_wordpress.stdout is regex('^' ~ (wp_version | regex_escape) ~ '([.-]|$)') and
+            (actual_http_server.stdout ~ actual_http_server.stderr) is regex('(?i)' ~ (http_server_name | regex_escape) ~ '(/|\\s)' ~ (http_server_version | regex_escape)) and
+            (wp_checks.results | selectattr('rc', 'ne', 0) | list | length == 0) and
+            native_db_check.rc == 0 and
+            'status\tError' not in native_db_check.stdout and
+            'Corrupt' not in native_db_check.stdout and
+            converted_home.stdout | trim == local_origin and
+            converted_siteurl.stdout | trim == local_origin and
+            remaining_origin.rc == 0 and remaining_origin.stdout | trim == '0' and
+            homepage_check.status | default(0) == 200 and
+            admin_check.status | default(0) in [200, 401, 403, 404] and
+            login_check.status | default(0) == 200 and
+            (uploads.matched | default(0) | int == 0 or media_check.status | default(0) in [200, 206]) and
+            'Fatal error' not in (homepage_check.content | default('')) and
+            'Fatal error' not in (admin_check.content | default('')) and
+            'Fatal error' not in (login_check.content | default('')) and
+            'PHP Fatal' not in application_logs.stdout
+          }}
+
+    - name: Write the validation report
+      ansible.builtin.template:
+        src: wp-local-validation-report.yml.j2
+        dest: "{{ site_dir }}/validation-report.yml"
+        mode: "0644"
+
+    - name: Report local recovery outcome
+      ansible.builtin.assert:
+        that: validation_passed | bool
+        success_msg: "Restored {{ restore_site }} at {{ local_origin }}"
+        fail_msg: "Restore started but validation failed; inspect {{ site_dir }}/validation-report.yml and containers.log."
