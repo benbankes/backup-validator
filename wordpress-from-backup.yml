@@ -113,7 +113,7 @@
           - archive_members.stdout_lines | select('search', '(^|/)\\.\\.(/|$)') | list | length == 0
         fail_msg: The archive contains an absolute path or parent-directory traversal.
 
-    - name: Reject unsafe archive links and special files
+    - name: Validate archive links and special files
       ansible.builtin.command:
         argv:
           - python3
@@ -135,10 +135,9 @@
                         target = pathlib.PurePosixPath(member.linkname)
                         combined = name.parent / target
                         if target.is_absolute() or ".." in combined.parts:
-                            raise SystemExit(
-                                f"unsafe archive link: {member.name} -> {member.linkname}"
-                            )
+                            print(f"{member.name} -> {member.linkname}")
           - "{{ backup_archive }}"
+      register: unsafe_archive_links
       changed_when: false
 
     - name: Remove a previous route for this site
@@ -169,11 +168,32 @@
         state: directory
         mode: "0755"
 
-    - name: Extract the selected backup
-      ansible.builtin.unarchive:
-        src: "{{ backup_archive }}"
-        dest: "{{ site_dir }}"
-        remote_src: true
+    - name: Extract the selected backup while omitting unsafe links
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import pathlib
+            import sys
+            import tarfile
+
+            archive, destination = sys.argv[1:]
+
+            def safe_member(member, path):
+                if member.issym() or member.islnk():
+                    name = pathlib.PurePosixPath(member.name)
+                    target = pathlib.PurePosixPath(member.linkname)
+                    combined = name.parent / target
+                    if target.is_absolute() or ".." in combined.parts:
+                        return None
+                return member
+
+            with tarfile.open(archive, "r:gz") as source:
+                source.extractall(destination, filter=safe_member)
+          - "{{ backup_archive }}"
+          - "{{ site_dir }}"
+      changed_when: true
 
     - name: Inspect required recovered files
       ansible.builtin.stat:
@@ -309,6 +329,22 @@
         - { name: WP_ENVIRONMENT_TYPE, value: local, raw: false }
         - { name: DISABLE_WP_CRON, value: "true", raw: true }
       no_log: true
+
+    - name: Check for a recovered Apache configuration file
+      ansible.builtin.stat:
+        path: "{{ site_dir }}/files/.htaccess"
+      register: recovered_htaccess
+      when: http_server_name | lower == 'apache'
+
+    - name: Disable production HTTP-to-HTTPS rewrite in the recovered Apache copy
+      ansible.builtin.replace:
+        path: "{{ site_dir }}/files/.htaccess"
+        regexp: '(?m)^RewriteCond %\{HTTPS\} !=on\s*\nRewriteRule \^\(\.\*\)\$ https://%\{HTTP_HOST\}%\{REQUEST_URI\} \[L,R=301\]\s*$'
+        replace: |-
+          # WP local restore: production HTTPS redirect disabled.
+      when:
+        - http_server_name | lower == 'apache'
+        - recovered_htaccess.stat.exists
 
     - name: Give the web runtime ownership of the recovered working copy
       ansible.builtin.command:

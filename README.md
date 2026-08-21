@@ -13,6 +13,9 @@ infrastructure.
 - Docker Compose (`docker compose`).
 - Local port 80 available on `127.0.0.1`.
 - Permission to update WSL's `/etc/hosts`; passwordless sudo is simplest.
+- A `127.0.0.1 <site>.test` entry in the Windows hosts file for each site being
+  restored. The restore checks these mappings before starting Docker work and
+  prints copy/paste-ready guidance when any are missing.
 - Populated `host_vars/<site>.yml` environment-version declarations.
 
 Confirm Docker access before restoring:
@@ -85,8 +88,8 @@ site has its own WordPress runtime, MySQL container, private network, and
 database volume. A shared nginx proxy routes `.test` hostnames to each site.
 
 The restore updates WSL's `/etc/hosts`. A browser running on Windows does not
-necessarily use that file. If a Windows browser cannot resolve a restored name,
-add equivalent entries to the elevated Windows hosts file at
+use that file. Before doing any expensive work, the restore therefore verifies
+equivalent entries in the Windows hosts file at
 `C:\Windows\System32\drivers\etc\hosts`:
 
 ```text
@@ -97,6 +100,12 @@ add equivalent entries to the elevated Windows hosts file at
 ```
 
 Docker Desktop normally forwards the WSL-published loopback port to Windows.
+If Windows is installed somewhere other than the standard C: location, set the
+WSL path explicitly, for example:
+
+```bash
+WINDOWS_HOSTS_FILE=/mnt/d/Windows/System32/drivers/etc/hosts ./wp-local-restore.sh
+```
 
 ## Validation and artifacts
 
@@ -149,8 +158,8 @@ Both commands provide built-in help:
 - **Port 80 already occupied:** stop the unmanaged listener before restoring.
 - **Sudo failure:** the WSL hosts-file update requires privilege. Configure
   passwordless sudo or make Ansible become credentials available.
-- **Site does not resolve in a Windows browser:** add the `.test` entries to the
-  Windows hosts file as described above.
+- **Missing Windows hosts entries:** open the path printed by the restore as
+  Administrator, paste the generated mappings, save it, and rerun.
 - **Restore validation fails:** inspect the per-site report and container log.
 
 ## Existing backup infrastructure

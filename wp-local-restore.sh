@@ -6,6 +6,7 @@ backup_dir="${repo_dir}/backups"
 inventory_file="${repo_dir}/hosts"
 playbook="${repo_dir}/wordpress-from-backup.yml"
 restore_http_port="${WP_LOCAL_PORT:-80}"
+windows_hosts_file="${WINDOWS_HOSTS_FILE:-/mnt/c/Windows/System32/drivers/etc/hosts}"
 
 usage() {
   cat <<'EOF'
@@ -22,6 +23,9 @@ Expected archive name: <inventory-host>-YYYY-MM-DD.tar.gz
 
 Set WP_LOCAL_PORT to use a shared port other than 80, for example:
   WP_LOCAL_PORT=8080 ./wp-local-restore.sh
+
+Set WINDOWS_HOSTS_FILE only when Windows is installed somewhere other than the
+standard /mnt/c/Windows location.
 EOF
 }
 
@@ -46,19 +50,6 @@ fi
 
 if ! command -v ansible-playbook >/dev/null 2>&1; then
   printf 'ansible-playbook is required but was not found.\n' >&2
-  exit 1
-fi
-
-if ! command -v docker >/dev/null 2>&1 || [[ ! -x "$(command -v docker 2>/dev/null)" ]]; then
-  printf '%s\n' \
-    'Docker CLI is unavailable in this WSL distro.' \
-    'Enable this distro in Docker Desktop > Settings > Resources > WSL integration,' \
-    'apply the change, and verify that `docker info` succeeds before retrying.' >&2
-  exit 1
-fi
-
-if ! docker compose version >/dev/null 2>&1; then
-  printf 'Docker Compose is unavailable; verify `docker compose version` before retrying.\n' >&2
   exit 1
 fi
 
@@ -161,6 +152,73 @@ fi
 
 if (( ${#selected_sites[@]} == 0 )); then
   printf 'No restorable archives were selected.\n' >&2
+  exit 1
+fi
+
+if [[ ! -r "$windows_hosts_file" ]]; then
+  printf '%s\n' \
+    "Windows hosts file is not readable from WSL: ${windows_hosts_file}" \
+    'Mount the Windows drive or set WINDOWS_HOSTS_FILE to its WSL path, then retry.' >&2
+  exit 1
+fi
+
+missing_windows_hosts=()
+for site in "${selected_sites[@]}"; do
+  local_site="${site%.*}.test"
+  if ! awk -v required_host="$local_site" '
+    {
+      sub(/\r$/, "")
+      sub(/[[:space:]]*#.*/, "")
+      if ($1 == "127.0.0.1") {
+        for (field = 2; field <= NF; field++) {
+          if ($field == required_host) {
+            found = 1
+          }
+        }
+      }
+    }
+    END { exit(found ? 0 : 1) }
+  ' "$windows_hosts_file"; then
+    missing_windows_hosts+=("$local_site")
+  fi
+done
+
+if (( ${#missing_windows_hosts[@]} > 0 )); then
+  printf '%s\n' \
+    'Missing required Windows hosts entries.' \
+    '' \
+    'Open this file as Administrator:' \
+    'C:\Windows\System32\drivers\etc\hosts' \
+    '' \
+    'Add:' >&2
+  for local_site in "${missing_windows_hosts[@]}"; do
+    printf '127.0.0.1 %s\n' "$local_site" >&2
+  done
+  printf '\nThen rerun:\n' >&2
+  if [[ -n "$requested_site" ]]; then
+    if (( restore_http_port == 80 )); then
+      printf './wp-local-restore.sh %s\n' "$requested_site" >&2
+    else
+      printf 'WP_LOCAL_PORT=%s ./wp-local-restore.sh %s\n' "$restore_http_port" "$requested_site" >&2
+    fi
+  elif (( restore_http_port == 80 )); then
+    printf './wp-local-restore.sh\n' >&2
+  else
+    printf 'WP_LOCAL_PORT=%s ./wp-local-restore.sh\n' "$restore_http_port" >&2
+  fi
+  exit 1
+fi
+
+if ! command -v docker >/dev/null 2>&1 || [[ ! -x "$(command -v docker 2>/dev/null)" ]]; then
+  printf '%s\n' \
+    'Docker CLI is unavailable in this WSL distro.' \
+    'Enable this distro in Docker Desktop > Settings > Resources > WSL integration,' \
+    'apply the change, and verify that `docker info` succeeds before retrying.' >&2
+  exit 1
+fi
+
+if ! docker compose version >/dev/null 2>&1; then
+  printf 'Docker Compose is unavailable; verify `docker compose version` before retrying.\n' >&2
   exit 1
 fi
 
