@@ -16,7 +16,7 @@
     site_compose_file: "{{ site_dir }}/compose.yml"
     route_file: "{{ proxy_dir }}/conf.d/{{ restore_slug }}.conf"
     host_marker: "wp-local-restore:{{ restore_site }}"
-    effective_http_port: "{{ restore_http_port | default(80) | int }}"
+    effective_http_port: "{{ restore_http_port | default(8080) | int }}"
     local_http_host: "{{ local_hostname }}{{ (effective_http_port | int == 80) | ternary('', ':' ~ effective_http_port) }}"
     local_origin: "http://{{ local_hostname }}{{ (effective_http_port | int == 80) | ternary('', ':' ~ effective_http_port) }}"
 

@@ -11,7 +11,7 @@ infrastructure.
 - Docker Desktop with WSL integration enabled for this distribution, or another
   Docker daemon accessible to the current WSL user.
 - Docker Compose (`docker compose`).
-- Local port 80 available on `127.0.0.1`.
+- Local port 8080 available on `127.0.0.1`.
 - Permission to update WSL's `/etc/hosts`; passwordless sudo is simplest.
 - A `127.0.0.1 <site>.test` entry in the Windows hosts file for each site being
   restored. The restore checks these mappings before starting Docker work and
@@ -65,23 +65,23 @@ Restore one site:
 ./wp-local-restore.sh flextalk.org
 ```
 
-Successful sites remain running together on port 80:
+Successful sites remain running together on port 8080:
 
 ```text
-http://flextalk.test
-http://pursuegod.test
-http://pursuegodkids.test
-http://buscadedios.test
+http://flextalk.test:8080
+http://pursuegod.test:8080
+http://pursuegodkids.test:8080
+http://buscadedios.test:8080
 ```
 
-Port 80 is the default. If it is already occupied, choose one shared alternate
-port for every restored domain:
+Port 8080 is the default. To choose another shared port for every restored
+domain:
 
 ```bash
-WP_LOCAL_PORT=8080 ./wp-local-restore.sh
+WP_LOCAL_PORT=9090 ./wp-local-restore.sh
 ```
 
-The resulting URLs include that port, such as `http://flextalk.test:8080`.
+The resulting URLs include that port, such as `http://flextalk.test:9090`.
 
 The wrapper restores databases sequentially to limit resource pressure. Each
 site has its own WordPress runtime, MySQL container, private network, and
@@ -155,7 +155,8 @@ Both commands provide built-in help:
   `docker info` succeeds without sudo. If `/usr/bin/docker` points into
   `/mnt/wsl/docker-desktop/cli-tools/` but that directory is empty, disable and
   re-enable integration for this distro in Docker Desktop, then apply/restart.
-- **Port 80 already occupied:** stop the unmanaged listener before restoring.
+- **Port 8080 already occupied:** stop the unmanaged listener or select another
+  shared port with `WP_LOCAL_PORT` before restoring.
 - **Sudo failure:** the WSL hosts-file update requires privilege. Configure
   passwordless sudo or make Ansible become credentials available.
 - **Missing Windows hosts entries:** open the path printed by the restore as

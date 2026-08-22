@@ -5,7 +5,8 @@ repo_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 backup_dir="${repo_dir}/backups"
 inventory_file="${repo_dir}/hosts"
 playbook="${repo_dir}/wordpress-from-backup.yml"
-restore_http_port="${WP_LOCAL_PORT:-80}"
+default_http_port=8080
+restore_http_port="${WP_LOCAL_PORT:-$default_http_port}"
 windows_hosts_file="${WINDOWS_HOSTS_FILE:-/mnt/c/Windows/System32/drivers/etc/hosts}"
 
 usage() {
@@ -21,8 +22,9 @@ Examples:
 
 Expected archive name: <inventory-host>-YYYY-MM-DD.tar.gz
 
-Set WP_LOCAL_PORT to use a shared port other than 80, for example:
-  WP_LOCAL_PORT=8080 ./wp-local-restore.sh
+The shared local proxy listens on 127.0.0.1:8080 by default. Set
+WP_LOCAL_PORT to use another port, for example:
+  WP_LOCAL_PORT=9090 ./wp-local-restore.sh
 
 Set WINDOWS_HOSTS_FILE only when Windows is installed somewhere other than the
 standard /mnt/c/Windows location.
@@ -196,12 +198,12 @@ if (( ${#missing_windows_hosts[@]} > 0 )); then
   done
   printf '\nThen rerun:\n' >&2
   if [[ -n "$requested_site" ]]; then
-    if (( restore_http_port == 80 )); then
+    if (( restore_http_port == default_http_port )); then
       printf './wp-local-restore.sh %s\n' "$requested_site" >&2
     else
       printf 'WP_LOCAL_PORT=%s ./wp-local-restore.sh %s\n' "$restore_http_port" "$requested_site" >&2
     fi
-  elif (( restore_http_port == 80 )); then
+  elif (( restore_http_port == default_http_port )); then
     printf './wp-local-restore.sh\n' >&2
   else
     printf 'WP_LOCAL_PORT=%s ./wp-local-restore.sh\n' "$restore_http_port" >&2
