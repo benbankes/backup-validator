@@ -37,8 +37,8 @@ checks:
     http_status: {{ login_check.status | default(0) }}
     custom_login_detected: {{ (hidden_login_option.rc == 0) | bool | to_json }}
   - command: sampled media request
-    status: {{ ((uploads.matched | default(0) | int == 0) or (media_check.status | default(0) in [200, 206])) | ternary('pass', 'fail') | to_json }}
-    note: {{ ((uploads.matched | default(0) | int == 0) | ternary('No sampled upload was present', 'Sampled one recovered upload')) | to_json }}
+    status: {{ ((sample_upload.stdout | default('') | trim | length == 0) or (media_check.status | default(0) in [200, 206])) | ternary('pass', 'fail') | to_json }}
+    note: {{ ((sample_upload.stdout | default('') | trim | length == 0) | ternary('No sampled upload was present', 'Sampled one recovered upload')) | to_json }}
   - command: remaining production-origin scan
     status: {{ (remaining_origin.rc == 0 and remaining_origin.stdout | trim == '0') | ternary('pass', 'fail') | to_json }}
     remaining_replacements: {{ remaining_origin.stdout | default('') | trim | to_json }}

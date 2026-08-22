@@ -49,6 +49,8 @@ services:
   wpcli:
     image: wordpress:cli-php{{ php_version }}
     profiles: [tools]
+    entrypoint: ["tail", "-f", "/dev/null"]
+    command: []
     user: "33:33"
     environment: { HOME: /tmp }
     volumes: ["./files:/var/www/html"]

@@ -130,7 +130,17 @@ Generated state is stored under `.restore/`:
 
 A failed validation leaves its workspace and logs available for diagnosis. The
 source archive is never modified. Application containers have no outbound
-internet access; only the short-lived WP-CLI service has egress for checksums.
+internet access.
+
+To reduce container startup overhead, each site reuses one temporary WP-CLI
+container for configuration, URL conversion, and validation commands. That
+container has temporary internet egress so it can verify WordPress checksums and
+is removed after validation or by the cleanup command. If a restore is
+interrupted, it may remain until the site is restored again or cleaned up.
+
+Media validation stops after finding and requesting one supported upload. This
+confirms that recovered media is present and reachable, but it does not validate
+every upload or guarantee that the same sample is selected on every run.
 
 ## Cleanup
 

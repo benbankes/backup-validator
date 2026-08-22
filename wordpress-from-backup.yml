@@ -301,6 +301,11 @@
       changed_when: false
       no_log: true
 
+    - name: Start one reusable WP-CLI container for this restore
+      ansible.builtin.command:
+        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", up, --detach, wpcli]
+      changed_when: true
+
     - name: Apply local database and safety constants to recovered wp-config.php
       ansible.builtin.command:
         argv:
@@ -310,9 +315,8 @@
           - "{{ site_project }}"
           - --file
           - "{{ site_compose_file }}"
-          - run
-          - --rm
-          - --no-deps
+          - exec
+          - -T
           - --user
           - "0:0"
           - wpcli
@@ -356,19 +360,19 @@
 
     - name: Read the production home URL from the restored database
       ansible.builtin.command:
-        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", run, --rm, wpcli, wp, option, get, home, --skip-plugins, --skip-themes]
+        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", exec, -T, wpcli, wp, option, get, home, --skip-plugins, --skip-themes]
       register: old_home
       changed_when: false
 
     - name: Read the production site URL from the restored database
       ansible.builtin.command:
-        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", run, --rm, wpcli, wp, option, get, siteurl, --skip-plugins, --skip-themes]
+        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", exec, -T, wpcli, wp, option, get, siteurl, --skip-plugins, --skip-themes]
       register: old_siteurl
       changed_when: false
 
     - name: Detect WordPress multisite
       ansible.builtin.command:
-        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", run, --rm, wpcli, wp, config, get, MULTISITE, --type=constant]
+        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", exec, -T, wpcli, wp, config, get, MULTISITE, --type=constant]
       register: multisite_setting
       changed_when: false
       failed_when: false
@@ -378,7 +382,7 @@
         argv: >-
           {{
             ['docker', 'compose', '--project-name', site_project, '--file', site_compose_file,
-             'run', '--rm', 'wpcli', 'wp', 'search-replace', item, local_origin,
+             'exec', '-T', 'wpcli', 'wp', 'search-replace', item, local_origin,
              '--all-tables-with-prefix', '--skip-columns=guid', '--skip-plugins', '--skip-themes']
             + (['--network'] if (multisite_setting.rc == 0 and multisite_setting.stdout | trim | lower in ['1', 'true']) else [])
           }}
@@ -441,7 +445,7 @@
 
     - name: Read actual WordPress version
       ansible.builtin.command:
-        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", run, --rm, wpcli, wp, core, version, --skip-plugins, --skip-themes]
+        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", exec, -T, wpcli, wp, core, version, --skip-plugins, --skip-themes]
       register: actual_wordpress
       changed_when: false
       failed_when: false
@@ -460,7 +464,7 @@
 
     - name: Run WP-CLI recovery checks
       ansible.builtin.command:
-        argv: "{{ ['docker', 'compose', '--project-name', site_project, '--file', site_compose_file, 'run', '--rm', 'wpcli', 'wp'] + item }}"
+        argv: "{{ ['docker', 'compose', '--project-name', site_project, '--file', site_compose_file, 'exec', '-T', 'wpcli', 'wp'] + item }}"
       loop:
         - [core, is-installed, --skip-plugins, --skip-themes]
         - [plugin, list, --skip-plugins, --skip-themes, --format=count]
@@ -499,21 +503,21 @@
 
     - name: Confirm converted home URL
       ansible.builtin.command:
-        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", run, --rm, wpcli, wp, option, get, home, --skip-plugins, --skip-themes]
+        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", exec, -T, wpcli, wp, option, get, home, --skip-plugins, --skip-themes]
       register: converted_home
       changed_when: false
       failed_when: false
 
     - name: Confirm converted site URL
       ansible.builtin.command:
-        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", run, --rm, wpcli, wp, option, get, siteurl, --skip-plugins, --skip-themes]
+        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", exec, -T, wpcli, wp, option, get, siteurl, --skip-plugins, --skip-themes]
       register: converted_siteurl
       changed_when: false
       failed_when: false
 
     - name: Look for remaining production home references
       ansible.builtin.command:
-        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", run, --rm, wpcli, wp, search-replace, "{{ old_home.stdout | trim }}", "{{ local_origin }}", --all-tables-with-prefix, --skip-columns=guid, --skip-plugins, --skip-themes, --dry-run, --format=count]
+        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", exec, -T, wpcli, wp, search-replace, "{{ old_home.stdout | trim }}", "{{ local_origin }}", --all-tables-with-prefix, --skip-columns=guid, --skip-plugins, --skip-themes, --dry-run, --format=count]
       register: remaining_origin
       changed_when: false
       failed_when: false
@@ -540,11 +544,16 @@
 
     - name: Detect a restored custom login path
       ansible.builtin.command:
-        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", run, --rm, wpcli, wp, option, get, whl_page, --skip-plugins, --skip-themes]
+        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", exec, -T, wpcli, wp, option, get, whl_page, --skip-plugins, --skip-themes]
       register: hidden_login_option
       changed_when: false
       failed_when: false
       no_log: true
+
+    - name: Remove the reusable WP-CLI container
+      ansible.builtin.command:
+        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", rm, --force, --stop, wpcli]
+      changed_when: true
 
     - name: Select the restored login path
       ansible.builtin.set_fact:
@@ -567,23 +576,21 @@
       failed_when: false
       no_log: true
 
-    - name: Find recovered uploads
-      ansible.builtin.find:
-        paths: "{{ site_dir }}/files/wp-content/uploads"
-        file_type: file
-        recurse: true
-        patterns: ["*.jpg", "*.jpeg", "*.png", "*.gif", "*.webp", "*.pdf"]
-      register: uploads
+    - name: Find the first recovered upload
+      ansible.builtin.command:
+        argv: [find, "{{ site_dir }}/files/wp-content/uploads", -type, f, "(", -iname, "*.jpg", -o, -iname, "*.jpeg", -o, -iname, "*.png", -o, -iname, "*.gif", -o, -iname, "*.webp", -o, -iname, "*.pdf", ")", -print, -quit]
+      register: sample_upload
+      changed_when: false
       failed_when: false
 
     - name: Sample one recovered media URL
       ansible.builtin.uri:
-        url: "http://127.0.0.1:{{ effective_http_port }}/wp-content/uploads/{{ uploads.files[0].path | regex_replace('^.*/wp-content/uploads/', '') }}"
+        url: "http://127.0.0.1:{{ effective_http_port }}/wp-content/uploads/{{ sample_upload.stdout | trim | regex_replace('^.*/wp-content/uploads/', '') }}"
         headers: { Host: "{{ local_http_host }}" }
         status_code: [200, 206]
       register: media_check
       failed_when: false
-      when: uploads.matched | default(0) | int > 0
+      when: sample_upload.rc == 0 and sample_upload.stdout | trim | length > 0
 
     - name: Capture application container logs
       ansible.builtin.command:
@@ -623,7 +630,7 @@
             homepage_check.status | default(0) == 200 and
             admin_check.status | default(0) in [200, 401, 403, 404] and
             login_check.status | default(0) == 200 and
-            (uploads.matched | default(0) | int == 0 or media_check.status | default(0) in [200, 206]) and
+            (sample_upload.stdout | default('') | trim | length == 0 or media_check.status | default(0) in [200, 206]) and
             'Fatal error' not in (homepage_check.content | default('')) and
             'Fatal error' not in (admin_check.content | default('')) and
             'Fatal error' not in (login_check.content | default('')) and
