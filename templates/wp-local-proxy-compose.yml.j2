@@ -1,0 +1,15 @@
+services:
+  gateway:
+    image: nginx:1.28
+    container_name: wp-local-proxy-gateway
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:{{ effective_http_port }}:80"
+    volumes:
+      - ./conf.d:/etc/nginx/conf.d:ro
+    networks: [proxy, host_access]
+networks:
+  proxy:
+    name: {{ proxy_network_name }}
+    internal: true
+  host_access:

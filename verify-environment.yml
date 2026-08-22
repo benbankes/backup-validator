@@ -1,0 +1,165 @@
+---
+- name: Verify declared production environment
+  hosts: all
+  gather_facts: false
+
+  vars:
+    wp_root_dir: "/home/{{ ansible_user }}/{{ inventory_hostname }}"
+
+  pre_tasks:
+    - name: Require all environment declarations
+      ansible.builtin.assert:
+        that:
+          - php_version is defined
+          - php_version | type_debug == 'str'
+          - php_version | string | length > 0
+          - db_engine_version is defined
+          - db_engine_version | type_debug == 'str'
+          - db_engine_version | string | length > 0
+          - wp_version is defined
+          - wp_version | type_debug == 'str'
+          - wp_version | string | length > 0
+          - http_server_name is defined
+          - http_server_name | string | length > 0
+          - http_server_version is defined
+          - http_server_version | type_debug == 'str'
+          - http_server_version | string | length > 0
+        fail_msg: >-
+          Define php_version, db_engine_version, wp_version,
+          http_server_name, and http_server_version in host_vars/{{ inventory_hostname }}.yml.
+          Quote every version value (for example, "8.3" and "1.30") so YAML does not
+          interpret it as a number.
+
+  tasks:
+    - name: Read the live PHP version
+      ansible.builtin.command:
+        argv: [php, -r, "echo PHP_VERSION;"]
+      register: live_php
+      changed_when: false
+
+    - name: Read the WordPress version from the live files
+      ansible.builtin.command:
+        argv:
+          - php
+          - -r
+          - "include $argv[1]; echo $wp_version;"
+          - "{{ wp_root_dir }}/wp-includes/version.php"
+      register: live_wordpress
+      changed_when: false
+
+    - name: Read the live MySQL server version
+      ansible.builtin.command:
+        argv:
+          - mysql
+          - --batch
+          - --skip-column-names
+          - "--host={{ mysql_host }}"
+          - "--user={{ mysql_user }}"
+          - -e
+          - SELECT VERSION();
+          - "{{ mysql_database }}"
+      environment:
+        MYSQL_PWD: "{{ mysql_pass }}"
+      register: live_mysql
+      changed_when: false
+      no_log: true
+
+    - name: Read the public web server header
+      ansible.builtin.uri:
+        url: "https://{{ inventory_hostname }}/"
+        method: HEAD
+        follow_redirects: all
+        return_content: false
+        status_code: [200, 301, 302, 303, 307, 308, 401, 403]
+        validate_certs: true
+        timeout: 20
+      register: live_http
+      delegate_to: localhost
+
+    - name: Read Apache version when the public header omits it
+      ansible.builtin.shell: |
+        set -o pipefail
+        if command -v apache2 >/dev/null 2>&1; then
+          apache2 -v 2>&1
+        elif command -v httpd >/dev/null 2>&1; then
+          httpd -v 2>&1
+        else
+          exit 127
+        fi
+      args:
+        executable: /bin/bash
+      register: live_apache_binary
+      changed_when: false
+      failed_when: false
+      when:
+        - http_server_name | lower == 'apache'
+        - (live_http.server | default('')) is not regex('(?i)apache/[0-9]')
+
+    - name: Read nginx version when the public header omits it
+      ansible.builtin.command:
+        argv: [nginx, -v]
+      register: live_nginx_binary
+      changed_when: false
+      failed_when: false
+      when:
+        - http_server_name | lower == 'nginx'
+        - (live_http.server | default('')) is not regex('(?i)nginx/[0-9]')
+
+    - name: Normalize detected values
+      ansible.builtin.set_fact:
+        actual_php_version: "{{ live_php.stdout | trim }}"
+        actual_wp_version: "{{ live_wordpress.stdout | trim }}"
+        actual_db_engine_version: "{{ live_mysql.stdout | trim }}"
+        actual_http_server: >-
+          {{
+            live_http.server | default('')
+            if (live_http.server | default('')) is regex('(?i)' ~ (http_server_name | string | regex_escape) ~ '/[0-9]')
+            else (
+              live_apache_binary.stdout | default('')
+              if http_server_name | lower == 'apache'
+              else ((live_nginx_binary.stderr | default('')) ~ ' ' ~ (live_nginx_binary.stdout | default('')))
+            )
+          }}
+      no_log: true
+
+    - name: Verify PHP version family
+      ansible.builtin.assert:
+        that:
+          - actual_php_version is regex('^' ~ (php_version | string | regex_escape) ~ '([.-]|$)')
+        fail_msg: "PHP mismatch: expected {{ php_version }}, detected {{ actual_php_version }}"
+        success_msg: "PHP {{ actual_php_version }} matches {{ php_version }}"
+
+    - name: Verify WordPress version family
+      ansible.builtin.assert:
+        that:
+          - actual_wp_version is regex('^' ~ (wp_version | string | regex_escape) ~ '([.-]|$)')
+        fail_msg: "WordPress mismatch: expected {{ wp_version }}, detected {{ actual_wp_version }}"
+        success_msg: "WordPress {{ actual_wp_version }} matches {{ wp_version }}"
+
+    - name: Verify MySQL version family
+      ansible.builtin.assert:
+        that:
+          - actual_db_engine_version is regex('^' ~ (db_engine_version | string | regex_escape) ~ '([.-]|$)')
+        fail_msg: "MySQL mismatch: expected {{ db_engine_version }}, detected {{ actual_db_engine_version }}"
+        success_msg: "MySQL {{ actual_db_engine_version }} matches {{ db_engine_version }}"
+
+    - name: Verify HTTP server name and version family
+      ansible.builtin.assert:
+        that:
+          - actual_http_server is regex('(?i)' ~ (http_server_name | string | regex_escape))
+          - actual_http_server is regex('(?i)' ~ (http_server_name | string | regex_escape) ~ '(/|\\s)' ~ (http_server_version | string | regex_escape) ~ '([.-]|\\s|$)')
+        fail_msg: >-
+          HTTP server mismatch: expected {{ http_server_name }}/{{ http_server_version }},
+          detected {{ actual_http_server | trim | default('no usable Server header or binary version', true) }}
+        success_msg: >-
+          HTTP server {{ actual_http_server | trim }} matches
+          {{ http_server_name }}/{{ http_server_version }}
+
+    - name: Report verified production environment
+      ansible.builtin.debug:
+        msg:
+          host: "{{ inventory_hostname }}"
+          php: "{{ actual_php_version }}"
+          mysql: "{{ actual_db_engine_version }}"
+          wordpress: "{{ actual_wp_version }}"
+          http_server: "{{ actual_http_server | trim }}"

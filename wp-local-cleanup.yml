@@ -1,0 +1,92 @@
+---
+- name: Remove one managed local WordPress restore
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    restore_root: "{{ playbook_dir }}/.restore"
+    site_dir: "{{ restore_root }}/{{ restore_site }}"
+    proxy_dir: "{{ restore_root }}/proxy"
+    proxy_compose_file: "{{ proxy_dir }}/compose.yml"
+    restore_slug: "{{ restore_site | regex_replace('[^A-Za-z0-9]+', '-') | lower }}"
+    site_project: "wp-local-{{ restore_slug }}"
+    site_compose_file: "{{ site_dir }}/compose.yml"
+    route_file: "{{ proxy_dir }}/conf.d/{{ restore_slug }}.conf"
+    host_marker: "wp-local-restore:{{ restore_site }}"
+  pre_tasks:
+    - name: Require the selected site
+      ansible.builtin.assert:
+        that:
+          - restore_site is defined
+          - restore_site | length > 0
+          - restore_site in groups['all']
+  tasks:
+    - name: Inspect generated site Compose definition
+      ansible.builtin.stat:
+        path: "{{ site_compose_file }}"
+      register: site_compose
+    - name: Remove generated site containers, networks, and volumes
+      ansible.builtin.command:
+        argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", down, --volumes, --remove-orphans]
+      when: site_compose.stat.exists
+      changed_when: true
+    - name: Remove the site's generated proxy route
+      ansible.builtin.file:
+        path: "{{ route_file }}"
+        state: absent
+    - name: Remove the marked WSL hosts entry
+      ansible.builtin.lineinfile:
+        path: /etc/hosts
+        regexp: "# {{ host_marker | regex_escape }}$"
+        state: absent
+      become: true
+    - name: Remove the site's generated workspace
+      ansible.builtin.file:
+        path: "{{ site_dir }}"
+        state: absent
+      become: true
+    - name: Inspect the shared proxy route directory
+      ansible.builtin.stat:
+        path: "{{ proxy_dir }}/conf.d"
+      register: proxy_routes_dir
+    - name: Find remaining generated proxy routes
+      ansible.builtin.find:
+        paths: "{{ proxy_dir }}/conf.d"
+        patterns: "*.conf"
+        excludes: 00-default.conf
+        file_type: file
+      register: remaining_routes
+      when: proxy_routes_dir.stat.isdir | default(false)
+    - name: Inspect the shared proxy Compose definition
+      ansible.builtin.stat:
+        path: "{{ proxy_compose_file }}"
+      register: proxy_compose
+    - name: Validate remaining proxy routes
+      ansible.builtin.command:
+        argv: [docker, exec, wp-local-proxy-gateway, nginx, -t]
+      when:
+        - proxy_compose.stat.exists
+        - remaining_routes.matched | default(0) | int > 0
+      changed_when: false
+      failed_when: false
+      register: proxy_validation
+    - name: Reload proxy after focused cleanup
+      ansible.builtin.command:
+        argv: [docker, exec, wp-local-proxy-gateway, nginx, -s, reload]
+      when:
+        - proxy_compose.stat.exists
+        - remaining_routes.matched | default(0) | int > 0
+        - proxy_validation.rc | default(1) == 0
+      changed_when: true
+    - name: Remove the shared proxy when its final site is gone
+      ansible.builtin.command:
+        argv: [docker, compose, --project-name, wp-local-proxy, --file, "{{ proxy_compose_file }}", down, --remove-orphans]
+      when:
+        - proxy_compose.stat.exists
+        - remaining_routes.matched | default(0) | int == 0
+      changed_when: true
+    - name: Remove the unused shared proxy workspace
+      ansible.builtin.file:
+        path: "{{ proxy_dir }}"
+        state: absent
+      when: remaining_routes.matched | default(0) | int == 0
