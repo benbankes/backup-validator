@@ -89,14 +89,17 @@
         ss -H -ltn 'sport = :{{ effective_http_port }}' || true
       args:
         executable: /bin/bash
-      register: port_80_listener
+      register: selected_port_listener
       changed_when: false
       when: proxy_running.stdout | trim == ''
 
     - name: Require the selected local port to be available
       ansible.builtin.assert:
-        that: port_80_listener.stdout | default('') | trim == ''
-        fail_msg: "Local port {{ effective_http_port }} is already occupied by an unmanaged process."
+        that: selected_port_listener.stdout | default('') | trim == ''
+        fail_msg: |-
+          Local port {{ effective_http_port }} is already occupied by an unmanaged process.
+          Stop that process or retry with another port, for example:
+          WP_LOCAL_PORT={{ (effective_http_port | int == 8081) | ternary(8082, 8081) }} ./wp-local-restore.sh {{ restore_site }}
       when: proxy_running.stdout | trim == ''
 
   tasks:
