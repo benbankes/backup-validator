@@ -65,6 +65,18 @@ Restore one site:
 ./wp-local-restore.sh flextalk.org
 ```
 
+Restore several sites concurrently with a bounded worker count:
+
+```bash
+./wp-local-restore.sh --parallel 2
+./wp-local-restore.sh --parallel 4
+```
+
+Sequential restoration remains the default. Parallel mode overlaps archive
+processing, MySQL imports, URL conversion, and validation while locking shared
+proxy and WSL hosts-file changes. Higher values can increase CPU, memory, and
+disk contention, so `--parallel 2` is the recommended starting point.
+
 Successful sites remain running together on port 8080:
 
 ```text
@@ -83,8 +95,7 @@ WP_LOCAL_PORT=9090 ./wp-local-restore.sh
 
 The resulting URLs include that port, such as `http://flextalk.test:9090`.
 
-The wrapper restores databases sequentially to limit resource pressure. Each
-site has its own WordPress runtime, MySQL container, private network, and
+Each site has its own WordPress runtime, MySQL container, private network, and
 database volume. A shared nginx proxy routes `.test` hostnames to each site.
 
 The restore updates WSL's `/etc/hosts`. A browser running on Windows does not

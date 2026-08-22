@@ -8,16 +8,20 @@ playbook="${repo_dir}/wordpress-from-backup.yml"
 default_http_port=8080
 restore_http_port="${WP_LOCAL_PORT:-$default_http_port}"
 windows_hosts_file="${WINDOWS_HOSTS_FILE:-/mnt/c/Windows/System32/drivers/etc/hosts}"
+parallelism=1
+requested_site=""
 
 usage() {
   cat <<'EOF'
-Usage: ./wp-local-restore.sh [SITE]
+Usage: ./wp-local-restore.sh [--parallel N] [SITE]
 
 Restore the newest dated backup for SITE, or every site represented in
 backups/ when SITE is omitted.
 
 Examples:
   ./wp-local-restore.sh
+  ./wp-local-restore.sh --parallel 2
+  ./wp-local-restore.sh --parallel 4
   ./wp-local-restore.sh flextalk.org
 
 Expected archive name: <inventory-host>-YYYY-MM-DD.tar.gz
@@ -31,19 +35,45 @@ standard /mnt/c/Windows location.
 EOF
 }
 
-case "${1:-}" in
-  -h|--help)
-    usage
-    exit 0
-    ;;
-esac
+while (( $# > 0 )); do
+  case "$1" in
+    -h|--help)
+      usage
+      exit 0
+      ;;
+    --parallel)
+      if (( $# < 2 )); then
+        printf '%s\n' '--parallel requires a positive integer.' >&2
+        exit 2
+      fi
+      parallelism="$2"
+      shift 2
+      ;;
+    --parallel=*)
+      parallelism="${1#*=}"
+      shift
+      ;;
+    -*)
+      printf 'Unknown option: %s\n' "$1" >&2
+      usage >&2
+      exit 2
+      ;;
+    *)
+      if [[ -n "$requested_site" ]]; then
+        printf 'Only one site may be specified.\n' >&2
+        usage >&2
+        exit 2
+      fi
+      requested_site="$1"
+      shift
+      ;;
+  esac
+done
 
-if (( $# > 1 )); then
-  usage >&2
+if [[ ! "$parallelism" =~ ^[1-9][0-9]*$ ]]; then
+  printf '%s\n' '--parallel must be a positive integer.' >&2
   exit 2
 fi
-
-requested_site="${1:-}"
 
 if [[ ! -d "$backup_dir" ]]; then
   printf 'Backup directory does not exist: %s\n' "$backup_dir" >&2
@@ -52,6 +82,11 @@ fi
 
 if ! command -v ansible-playbook >/dev/null 2>&1; then
   printf 'ansible-playbook is required but was not found.\n' >&2
+  exit 1
+fi
+
+if ! command -v flock >/dev/null 2>&1; then
+  printf 'flock is required for safe shared-state coordination but was not found.\n' >&2
   exit 1
 fi
 
@@ -228,7 +263,47 @@ export ANSIBLE_LOCAL_TEMP="${ANSIBLE_LOCAL_TEMP:-/tmp/backup-validator-ansible-l
 export ANSIBLE_REMOTE_TEMP="${ANSIBLE_REMOTE_TEMP:-/tmp/backup-validator-ansible-remote}"
 
 failures=()
-printf 'Restoring %d site(s) sequentially; successful sites remain running.\n' "${#selected_sites[@]}"
+declare -A restore_pid_site=()
+running=0
+
+run_restore() {
+  local site="$1"
+  local archive="$2"
+  local command=(
+    ansible-playbook "$playbook"
+    --extra-vars "restore_site=${site}"
+    --extra-vars "backup_archive=${archive}"
+    --extra-vars "restore_http_port=${restore_http_port}"
+  )
+
+  if (( parallelism == 1 )); then
+    "${command[@]}"
+  else
+    "${command[@]}" 2>&1 | sed -u "s/^/[${site}] /"
+  fi
+}
+
+wait_for_restore() {
+  local finished_pid=""
+  local finished_site=""
+
+  if wait -n -p finished_pid; then
+    :
+  else
+    finished_site="${restore_pid_site[$finished_pid]}"
+    failures+=("$finished_site")
+  fi
+  unset 'restore_pid_site[$finished_pid]'
+  running=$((running - 1))
+}
+
+if (( parallelism == 1 )); then
+  printf 'Restoring %d site(s) sequentially; successful sites remain running.\n' "${#selected_sites[@]}"
+else
+  printf 'Restoring %d site(s), up to %d in parallel; successful sites remain running.\n' \
+    "${#selected_sites[@]}" "$parallelism"
+fi
+
 for site in "${selected_sites[@]}"; do
   archive="${latest_archive[$site]}"
   printf '\n==> %s\n    archive: %s\n' "$site" "${archive##*/}"
@@ -239,12 +314,17 @@ for site in "${selected_sites[@]}"; do
     done <<< "${older_archives[$site]}"
   fi
 
-  if ! ansible-playbook "$playbook" \
-      --extra-vars "restore_site=${site}" \
-      --extra-vars "backup_archive=${archive}" \
-      --extra-vars "restore_http_port=${restore_http_port}"; then
-    failures+=("$site")
+  run_restore "$site" "$archive" &
+  restore_pid_site[$!]="$site"
+  running=$((running + 1))
+
+  if (( running >= parallelism )); then
+    wait_for_restore
   fi
+done
+
+while (( running > 0 )); do
+  wait_for_restore
 done
 
 printf '\nLocal restore summary:\n'

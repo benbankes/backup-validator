@@ -77,21 +77,19 @@
         argv: [docker, compose, version]
       changed_when: false
 
-    - name: Check whether the managed proxy is already running
-      ansible.builtin.command:
-        argv: [docker, ps, --filter, name=wp-local-proxy-gateway, --format, "{{ '{{' }}.ID{{ '}}' }}"]
-      register: proxy_running
-      changed_when: false
-
-    - name: Detect an unmanaged listener on the selected local port
+    - name: Detect an unmanaged listener on the selected local port under a lock
       ansible.builtin.shell: |
         set -o pipefail
-        ss -H -ltn 'sport = :{{ effective_http_port }}' || true
+        flock /tmp/backup-validator-wp-local-proxy.lock sh -ec '
+          if docker ps --quiet --filter name=^/wp-local-proxy-gateway$ | grep -q .; then
+            exit 0
+          fi
+          ss -H -ltn "sport = :{{ effective_http_port }}" || true
+        '
       args:
         executable: /bin/bash
       register: selected_port_listener
       changed_when: false
-      when: proxy_running.stdout | trim == ''
 
     - name: Require the selected local port to be available
       ansible.builtin.assert:
@@ -100,7 +98,6 @@
           Local port {{ effective_http_port }} is already occupied by an unmanaged process.
           Stop that process or retry with another port, for example:
           WP_LOCAL_PORT={{ (effective_http_port | int == 8081) | ternary(8082, 8081) }} ./wp-local-restore.sh {{ restore_site }}
-      when: proxy_running.stdout | trim == ''
 
   tasks:
     - name: List archive members without extracting
@@ -263,7 +260,7 @@
 
     - name: Start the shared local proxy and create its internal network
       ansible.builtin.command:
-        argv: [docker, compose, --project-name, wp-local-proxy, --file, "{{ proxy_compose_file }}", up, --detach]
+        argv: [flock, /tmp/backup-validator-wp-local-proxy.lock, docker, compose, --project-name, wp-local-proxy, --file, "{{ proxy_compose_file }}", up, --detach]
       changed_when: true
 
     - name: Write the local credential environment file
@@ -410,23 +407,54 @@
         dest: "{{ route_file }}"
         mode: "0644"
 
-    - name: Validate and reload the shared proxy configuration
-      ansible.builtin.command:
-        argv: [docker, exec, wp-local-proxy-gateway, nginx, -t]
-      changed_when: false
-
-    - name: Reload the shared proxy
-      ansible.builtin.command:
-        argv: [docker, exec, wp-local-proxy-gateway, nginx, -s, reload]
+    - name: Validate and reload the shared proxy configuration under a lock
+      ansible.builtin.shell: |
+        set -o pipefail
+        flock /tmp/backup-validator-wp-local-proxy.lock sh -ec '
+          docker exec wp-local-proxy-gateway nginx -t
+          docker exec wp-local-proxy-gateway nginx -s reload
+        '
+      args:
+        executable: /bin/bash
       changed_when: true
 
-    - name: Add a marked WSL hosts entry for the local domain
-      ansible.builtin.lineinfile:
-        path: /etc/hosts
-        regexp: "# {{ host_marker | regex_escape }}$"
-        line: "127.0.0.1 {{ local_hostname }} # {{ host_marker }}"
-        state: present
+    - name: Add a marked WSL hosts entry under a lock
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import fcntl
+            import pathlib
+            import sys
+
+            hostname, marker, lock_path = sys.argv[1:]
+            desired = f"127.0.0.1 {hostname} # {marker}"
+            suffix = f"# {marker}"
+
+            with open(lock_path, "w", encoding="utf-8") as lock:
+                fcntl.flock(lock, fcntl.LOCK_EX)
+                hosts_path = pathlib.Path("/etc/hosts")
+                with hosts_path.open("r+", encoding="utf-8") as hosts:
+                    original = hosts.read()
+                    lines = [
+                        line.rstrip("\n")
+                        for line in original.splitlines()
+                        if not line.rstrip("\n").endswith(suffix)
+                    ]
+                    lines.append(desired)
+                    updated = "\n".join(lines) + "\n"
+                    if updated != original:
+                        hosts.seek(0)
+                        hosts.write(updated)
+                        hosts.truncate()
+                        print("changed")
+          - "{{ local_hostname }}"
+          - "{{ host_marker }}"
+          - "{{ restore_root }}/.hosts.lock"
+      register: hosts_entry_update
       become: true
+      changed_when: hosts_entry_update.stdout | trim == 'changed'
 
     - name: Read actual PHP version
       ansible.builtin.command:
