@@ -387,6 +387,33 @@
       when: item != local_origin
       changed_when: true
 
+    - name: Detect a recovered Divi generated cache
+      ansible.builtin.stat:
+        path: "{{ site_dir }}/files/wp-content/et-cache"
+      register: divi_cache_before_restore
+
+    - name: Clear and recreate the recovered Divi generated cache
+      ansible.builtin.command:
+        argv:
+          - docker
+          - compose
+          - --project-name
+          - "{{ site_project }}"
+          - --file
+          - "{{ site_compose_file }}"
+          - exec
+          - -T
+          - --user
+          - "0:0"
+          - wpcli
+          - sh
+          - -ec
+          - >-
+            rm -rf /var/www/html/wp-content/et-cache &&
+            install -d -o 33 -g 33 -m 0755 /var/www/html/wp-content/et-cache
+      when: divi_cache_before_restore.stat.exists
+      changed_when: true
+
     - name: Start the recovered WordPress application
       ansible.builtin.command:
         argv: [docker, compose, --project-name, "{{ site_project }}", --file, "{{ site_compose_file }}", up, --detach]
@@ -454,7 +481,8 @@
           - "{{ restore_root }}/.hosts.lock"
       register: hosts_entry_update
       become: true
-      changed_when: hosts_entry_update.stdout | trim == 'changed'
+      changed_when:
+        - hosts_entry_update.stdout | trim == 'changed'
 
     - name: Read actual PHP version
       ansible.builtin.command:
@@ -560,6 +588,40 @@
       register: homepage_check
       failed_when: false
 
+    - name: Check regenerated Divi cache for production hostnames
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import pathlib
+            import sys
+            import urllib.parse
+
+            cache = pathlib.Path(sys.argv[1])
+            hostnames = {
+                urllib.parse.urlsplit(value).hostname.encode()
+                for value in sys.argv[2:]
+                if urllib.parse.urlsplit(value).hostname
+            }
+            matches = 0
+            if cache.is_dir() and hostnames:
+                for path in cache.rglob("*"):
+                    if path.is_file():
+                        try:
+                            content = path.read_bytes()
+                        except OSError:
+                            continue
+                        if any(hostname in content for hostname in hostnames):
+                            matches += 1
+            print(matches)
+          - "{{ site_dir }}/files/wp-content/et-cache"
+          - "{{ old_home.stdout | trim }}"
+          - "{{ old_siteurl.stdout | trim }}"
+      register: generated_cache_origin_scan
+      changed_when: false
+      failed_when: false
+
     - name: Request wp-admin through the shared proxy
       ansible.builtin.uri:
         url: "http://127.0.0.1:{{ effective_http_port }}/wp-admin/"
@@ -655,6 +717,7 @@
             converted_home.stdout | trim == local_origin and
             converted_siteurl.stdout | trim == local_origin and
             remaining_origin.rc == 0 and remaining_origin.stdout | trim == '0' and
+            generated_cache_origin_scan.rc == 0 and generated_cache_origin_scan.stdout | trim == '0' and
             homepage_check.status | default(0) == 200 and
             admin_check.status | default(0) in [200, 401, 403, 404] and
             login_check.status | default(0) == 200 and

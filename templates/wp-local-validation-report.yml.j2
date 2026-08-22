@@ -42,6 +42,10 @@ checks:
   - command: remaining production-origin scan
     status: {{ (remaining_origin.rc == 0 and remaining_origin.stdout | trim == '0') | ternary('pass', 'fail') | to_json }}
     remaining_replacements: {{ remaining_origin.stdout | default('') | trim | to_json }}
+  - command: regenerated Divi cache production-hostname scan
+    status: {{ (generated_cache_origin_scan.rc == 0 and generated_cache_origin_scan.stdout | trim == '0') | ternary('pass', 'fail') | to_json }}
+    cache_detected_and_cleared: {{ (divi_cache_before_restore.stat.exists | default(false)) | bool | to_json }}
+    files_with_production_hostnames: {{ generated_cache_origin_scan.stdout | default('') | trim | to_json }}
 artifacts:
   container_logs: containers.log
   compose_file: compose.yml
