@@ -126,6 +126,9 @@ For each site, the restore checks:
 - WordPress installation state, database integrity, plugins, and themes.
 - WordPress core checksums.
 - Serialized-data-safe conversion of production URLs to the `.test` URL.
+- Conditional clearing and regeneration of Divi's derived `wp-content/et-cache`
+  data, followed by a scan for remaining production hostnames. Sites without
+  that cache directory are left unchanged.
 - Homepage and `/wp-admin/` responses through the shared proxy.
 - A sampled upload when media exists.
 - Container output for PHP fatal errors.
