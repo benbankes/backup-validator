@@ -51,6 +51,34 @@ If verification reports an older CLI after installation, ensure `/usr/local/bin`
 comes before its directory on PATH. The installer does not remove other CLI
 installations. AWS CLI is only needed for S3 operations, not local restores.
 
+## Download latest backups from S3
+
+With AWS CLI configured in WSL, run:
+
+```bash
+ansible-playbook download-latest-backups.yml
+```
+
+The playbook runs locally without sudo and uses your existing AWS CLI credentials.
+If you configured a named profile, select it with the standard AWS environment
+variable, for example:
+
+```bash
+AWS_PROFILE=backup-validator ansible-playbook download-latest-backups.yml
+```
+
+For every site in `hosts`, it lists `s3://flextalk-backups/<site>/` and downloads
+the matching `<site>-YYYY-MM-DD.tar.gz` archive with the newest S3 `LastModified`
+time into this repository's `backups/` directory. Add future sites to `hosts` to
+include them. Listing includes all pages; unrelated files and nested paths are
+ignored. A missing archive or AWS error fails the run with the affected site.
+
+Each run downloads the selected archives again, including backups overwritten
+under the same filename. Downloads are staged and checked against the listed
+size before replacing the destination; existing archives survive failed transfers.
+Older local backups are retained. `--check` lists the selected backups without
+downloading them. No production SSH access or AWS writes are involved.
+
 ## Backup archive format
 
 Place archives in `backups/` at the repository root. Filenames must use the
