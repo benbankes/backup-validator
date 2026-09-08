@@ -1,0 +1,80 @@
+---
+# Run inside WSL: ansible-playbook install-aws-cli.yml
+- name: Install AWS CLI v2 locally
+  hosts: localhost
+  connection: local
+  gather_facts: true
+
+  tasks:
+    - name: Require supported Linux architecture
+      ansible.builtin.assert:
+        that:
+          - ansible_facts['system'] == 'Linux'
+          - ansible_facts['os_family'] == 'Debian'
+          - ansible_facts['architecture'] in ['x86_64', 'aarch64']
+        fail_msg: Run this playbook inside Ubuntu or Debian Linux (including WSL), on x86_64 or aarch64.
+
+    - name: Install or update AWS CLI v2
+      block:
+        - name: Install archive extraction and HTTPS prerequisites
+          ansible.builtin.apt:
+            name:
+              - unzip
+              - ca-certificates
+            state: present
+            update_cache: true
+            cache_valid_time: 3600
+          become: true
+
+        - name: Download and run installer
+          when: not ansible_check_mode
+          block:
+            - name: Create temporary installer directory
+              ansible.builtin.tempfile:
+                state: directory
+                prefix: backup-validator-aws-cli-
+              register: aws_cli_temp
+
+            - name: Download latest official AWS CLI v2 archive
+              ansible.builtin.get_url:
+                url: "https://awscli.amazonaws.com/awscli-exe-linux-{{ ansible_facts['architecture'] }}.zip"
+                dest: "{{ aws_cli_temp.path }}/awscliv2.zip"
+                mode: '0600'
+
+            - name: Extract AWS CLI installer
+              ansible.builtin.unarchive:
+                src: "{{ aws_cli_temp.path }}/awscliv2.zip"
+                dest: "{{ aws_cli_temp.path }}"
+                remote_src: true
+
+            - name: Install AWS CLI into /usr/local
+              ansible.builtin.command:
+                argv:
+                  - "{{ aws_cli_temp.path }}/aws/install"
+                  - --install-dir
+                  - /usr/local/aws-cli
+                  - --bin-dir
+                  - /usr/local/bin
+                  - --update
+              become: true
+              register: aws_cli_install
+              changed_when: "'Skipping install' not in aws_cli_install.stdout"
+
+          always:
+            - name: Remove temporary installer files
+              ansible.builtin.file:
+                path: "{{ aws_cli_temp.path }}"
+                state: absent
+              when: aws_cli_temp is defined and aws_cli_temp.path is defined
+
+    - name: Verify AWS CLI v2 is available on PATH
+      ansible.builtin.command: aws --version
+      register: aws_cli_after
+      changed_when: false
+      failed_when: aws_cli_after.rc != 0 or not aws_cli_after.stdout.startswith('aws-cli/2.')
+      when: not ansible_check_mode
+
+    - name: Show installed version
+      ansible.builtin.debug:
+        msg: "{{ aws_cli_after.stdout }}"
+      when: not ansible_check_mode

@@ -25,6 +25,32 @@ docker info
 docker compose version
 ```
 
+## AWS CLI for backup downloads
+
+Install the latest AWS CLI v2 inside Ubuntu/Debian WSL:
+
+```bash
+ansible-playbook install-aws-cli.yml
+```
+
+The playbook uses passwordless sudo and supports
+x86_64 and ARM64, downloads AWS's official Linux installer, and installs into
+`/usr/local/aws-cli` with commands in `/usr/local/bin`. Each run downloads the
+latest v2 release and installs or updates it. The installer skips installation
+when that version is already installed.
+
+Configure your download credentials separately, as your normal WSL user:
+
+```bash
+aws configure --profile backup-validator
+aws s3 ls s3://flextalk-backups/ --profile backup-validator
+```
+
+Credentials stay in your user's AWS configuration, outside this repository.
+If verification reports an older CLI after installation, ensure `/usr/local/bin`
+comes before its directory on PATH. The installer does not remove other CLI
+installations. AWS CLI is only needed for S3 operations, not local restores.
+
 ## Backup archive format
 
 Place archives in `backups/` at the repository root. Filenames must use the
