@@ -1,0 +1,102 @@
+---
+- name: Validate site name before constructing local paths
+  ansible.builtin.assert:
+    that: backup_site is match('^[A-Za-z0-9][A-Za-z0-9.-]*$')
+    fail_msg: "Invalid site name: {{ backup_site }}"
+
+# JSON output lets the CLI combine all pages before Ansible selects an archive.
+- name: "List S3 backups for {{ backup_site }}"
+  ansible.builtin.command:
+    argv:
+      - aws
+      - s3api
+      - list-objects-v2
+      - --bucket
+      - "{{ backup_bucket }}"
+      - --prefix
+      - "{{ backup_site }}/"
+      - --output
+      - json
+  register: backup_listing
+  changed_when: false
+  check_mode: false
+
+- name: Select matching archives ordered by S3 modification time
+  ansible.builtin.set_fact:
+    site_archives: >-
+      {{ (backup_listing.stdout | from_json).get('Contents', [])
+         | selectattr('Key', 'match', '^' ~ (backup_site | regex_escape) ~ '/'
+           ~ (backup_site | regex_escape) ~ '-[0-9]{4}-[0-9]{2}-[0-9]{2}\.tar\.gz$')
+         | sort(attribute='Key') | sort(attribute='LastModified') | list }}
+
+- name: Require an archive for this site
+  ansible.builtin.assert:
+    that: site_archives | length > 0
+    fail_msg: "No matching backup archives found in s3://{{ backup_bucket }}/{{ backup_site }}/"
+
+- name: Record latest archive
+  ansible.builtin.set_fact:
+    latest_backup: "{{ site_archives | last }}"
+
+- name: Show selected backup
+  ansible.builtin.debug:
+    msg: >-
+      s3://{{ backup_bucket }}/{{ latest_backup.Key }} ->
+      {{ backup_directory }}/{{ latest_backup.Key | basename }}
+      (modified {{ latest_backup.LastModified }}, {{ latest_backup.Size }} bytes)
+
+- name: Download and publish complete archive
+  when: not ansible_check_mode
+  block:
+    - name: Create temporary download file on the destination filesystem
+      ansible.builtin.tempfile:
+        state: file
+        path: "{{ backup_directory }}"
+        prefix: '.download-'
+      register: backup_temp
+
+    - name: Download selected backup using existing AWS credentials
+      ansible.builtin.command:
+        argv:
+          - aws
+          - s3
+          - cp
+          - "s3://{{ backup_bucket }}/{{ latest_backup.Key }}"
+          - "{{ backup_temp.path }}"
+          - --only-show-errors
+          - --no-progress
+      changed_when: true
+
+    - name: Check downloaded archive size
+      ansible.builtin.stat:
+        path: "{{ backup_temp.path }}"
+      register: downloaded_backup
+
+    - name: Require a complete nonempty download
+      ansible.builtin.assert:
+        that:
+          - downloaded_backup.stat.size | int == latest_backup.Size | int
+          - downloaded_backup.stat.size | int > 0
+        fail_msg: Download size differs from the S3 listing or the archive is empty. Rerun to refresh the listing.
+
+    - name: Restrict archive permissions
+      ansible.builtin.file:
+        path: "{{ backup_temp.path }}"
+        mode: '0600'
+
+    - name: Move completed download into place atomically
+      ansible.builtin.command:
+        argv:
+          - mv
+          - --force
+          - --
+          - "{{ backup_temp.path }}"
+          - "{{ backup_directory }}/{{ latest_backup.Key | basename }}"
+      changed_when: true
+
+  always:
+    - name: Clean up temporary download
+      ansible.builtin.file:
+        path: "{{ backup_temp.path }}"
+        state: absent
+      when: backup_temp is defined and backup_temp.path is defined

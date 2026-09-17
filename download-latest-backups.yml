@@ -1,0 +1,36 @@
+---
+# Run inside WSL: ansible-playbook download-latest-backups.yml
+- name: Download the latest S3 backup for every inventory site
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  become: false
+  environment:
+    AWS_PAGER: ''
+    AWS_CLI_AUTO_PROMPT: 'off'
+  vars:
+    backup_bucket: flextalk-backups
+    backup_directory: "{{ playbook_dir }}/backups"
+
+  tasks:
+    - name: Require sites in the inventory
+      ansible.builtin.assert:
+        that: groups['all'] | difference(['localhost']) | length > 0
+        fail_msg: Add the backed-up sites to the hosts inventory before running this playbook.
+
+    - name: Verify AWS CLI is available
+      ansible.builtin.command: aws --version
+      changed_when: false
+      check_mode: false
+
+    - name: Create local backups directory
+      ansible.builtin.file:
+        path: "{{ backup_directory }}"
+        state: directory
+        mode: '0700'
+
+    - name: Download each site's latest backup
+      ansible.builtin.include_tasks: tasks/download-site-backup.yml
+      loop: "{{ groups['all'] | difference(['localhost']) | sort }}"
+      loop_control:
+        loop_var: backup_site

@@ -54,12 +54,15 @@
     # Leverage the orchestrator to pipe/stream the archive directly from the production host to S3
     - name: Pipe archive download directly into Amazon S3 simultaneously
       ansible.builtin.shell: >
+        set -o pipefail;
         sshpass -e 
         ssh -o StrictHostKeyChecking=no -o IdentitiesOnly=yes 
         {{ ansible_user }}@{{ ansible_host }} 
         "cat /home/{{ ansible_user }}/ansible-backup-archives/archive.tar.gz" 
         | aws s3 cp - 
         s3://flextalk-backups/{{ inventory_hostname }}/{{ inventory_hostname }}-{{ lookup('ansible.builtin.pipe', 'date +%Y-%m-%d') }}.tar.gz
+      args:
+        executable: /bin/bash
       delegate_to: localhost
       # This block passes the password directly into memory, hiding it from process logs
       environment:
