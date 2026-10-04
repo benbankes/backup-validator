@@ -1,112 +1,222 @@
 # Networking and SSH setup
 
-Use this guide to create or verify networking for the public-IPv4 EC2 backup
-machine. Reuse suitable existing resources instead of recreating them. Follow
-sections 1–4 before IAM setup and sections 5–6 after IAM access is configured. Use a
-bootstrap administrator for resource creation and the `backup-validator` profile for operation.
-Replace uppercase placeholders and use the same region throughout.
+Run section 1 in **local WSL**, section 2 in **administrator CloudShell**, and
+section 3 back in WSL. Section 4 connects the backup machine to website servers.
+The CloudShell commands create networking and import a public key; they do not
+launch EC2 or create the S3 bucket. Use [IAM setup](IAM.md) between sections 2 and 3.
 
-## 1. Record the account settings
+## 1. Local WSL: prepare the operator SSH key
 
-Choose the account, region, bucket name and operator's current public IPv4 address.
-Use `us-east-1` to match the current scripts, unless deliberately changing their
-regional assumptions. Verify the account in administrator CloudShell:
-
-```bash
-aws sts get-caller-identity
-```
-
-Record the resulting VPC, subnet, internet gateway, route table and security group
-IDs as you create them. Also record the key-pair name and local private-key path.
-Resource IDs must belong to the selected account and region.
-
-## 2. Create the VPC and public subnet
-
-In the AWS account's VPC console, with the intended region selected:
-
-1. Create a VPC named `backup-validator`. Choose a non-overlapping private IPv4
-   CIDR; `10.80.0.0/16` is an example, not a required value. Enable DNS resolution
-   and DNS hostnames in its VPC settings.
-2. Create a subnet named `backup-validator-public` in that VPC, for example
-   `10.80.1.0/24`, in one availability zone offering the intended instance type.
-   Availability-zone letters need not identify the same physical zone across
-   accounts. Select an available zone in the account being configured.
-3. Create an internet gateway named `backup-validator` and attach it to this VPC.
-4. Create a route table named `backup-validator-public` in the VPC. Retain its
-   local route and add destination `0.0.0.0/0` targeting the new internet gateway.
-5. Explicitly associate this route table with the new subnet.
-6. Keep the default network ACL for this initial setup. Custom ACLs must permit
-   the connections below and return traffic, including ephemeral ports.
-
-The launch playbook explicitly requests a public IPv4 address, so subnet-wide
-auto-assignment is not required. Internet access requires both that public address
-and the internet-gateway route. This design does not need a NAT gateway. See
-[AWS internet gateway requirements](https://docs.aws.amazon.com/vpc/latest/userguide/VPC_Internet_Gateway.html).
-
-## 3. Create the backup machine's security group
-
-Create `SshSecurityGroup` in the selected VPC. Set these rules:
-
-| Direction | Protocol/port | Source or destination | Purpose |
-| --- | --- | --- | --- |
-| Inbound | TCP 22 | Operator's current public IPv4 `/32` | WSL/Ansible SSH to the backup machine |
-| Outbound | TCP 22 | Each website SSH endpoint's public IPv4 `/32`, or its documented required range | Backups from website servers |
-| Outbound | TCP 443 | `0.0.0.0/0` | S3, AWS APIs, GitHub and HTTPS package repositories |
-| Outbound | TCP 80 | `0.0.0.0/0` | Package repositories that use HTTP |
-
-Replace the group's default unrestricted outbound rule with the chosen outbound
-rules. Resolve the actual `ansible_host` values from your private host variables;
-web/CDN addresses are not necessarily the SSH endpoint addresses. Update the
-outbound rules if those SSH addresses change. Broader HTTPS destinations are used
-because package/GitHub endpoints can change addresses; tighter HTTPS egress would
-require additional endpoint/proxy design. Leave the VPC's default DNS resolver
-available. Security groups are stateful, so response traffic needs no separate
-inbound ephemeral-port rule.
-
-Do not add inbound HTTP, HTTPS or database rules: this machine connects outward
-to the website servers. The current workflow uses ordinary SSH with a local key,
-so it does not need an EC2 Instance Connect rule. Update the operator `/32` if
-their home/VPN public address changes.
-
-## 4. Create the operator-to-backup-machine SSH key
-
-There are two separate SSH relationships. This first key belongs to the operator
-and permits login **to EC2**. The key generated on EC2 in step 6 permits login
-**from EC2 to the website servers**.
-
-In WSL, generate a new local key at a previously unused path:
+Keep the private key on your workstation. This block reuses an existing key and
+recreates its public half if necessary; it does not overwrite a private key.
+Choose a passphrase when prompted and load it with `ssh-add` before using Ansible.
 
 ```bash
-mkdir -p ~/.ssh/backup-validator
-chmod 700 ~/.ssh/backup-validator
-ssh-keygen -t ed25519 -f ~/.ssh/backup-validator/operator
-chmod 600 ~/.ssh/backup-validator/operator
+(
+set -euo pipefail
+KEY_FILE="$HOME/.ssh/backup-validator/operator"
+mkdir -p "$(dirname "$KEY_FILE")"
+chmod 700 "$(dirname "$KEY_FILE")"
+if [[ ! -f "$KEY_FILE" ]]; then
+  ssh-keygen -t ed25519 -f "$KEY_FILE"
+fi
+chmod 600 "$KEY_FILE"
+ssh-keygen -y -f "$KEY_FILE" > "$KEY_FILE.pub"
+ssh-keygen -lf "$KEY_FILE.pub"
+printf 'Upload only this public file to CloudShell: %s.pub\n' "$KEY_FILE"
+)
 ```
 
-Use `ssh-agent` if you protect the private key with a passphrase. In the EC2
-console's Key pairs page, choose **Import key pair**, name it
-`backup-validator-operator`, and import `operator.pub`. Alternatively, upload
-only `operator.pub` to CloudShell and run there:
+Use CloudShell's **Actions → Upload file** to upload `operator.pub`. If Windows'
+file picker cannot browse your WSL files, use the distro's `\\wsl.localhost\` path.
+Do not upload `operator` (the private key).
+
+## 2. CloudShell: create or reuse the network
+
+Edit the variables, including your workstation's public IPv4 `/32` and the
+**website SSH servers'** IPv4 CIDRs (from `ansible_host`, not CDN/web addresses).
+Choose private CIDRs that do not overlap connected networks. The example uses
+`us-east-1`; choose an available zone supporting the intended instance type.
+
+Leave `VPC_ID` and `SUBNET_ID` empty to create/find resources using the
+`BackupNetwork` tag. Set them to explicitly reuse a VPC and a subnet dedicated to
+this backup machine. The gateway is reused by its VPC attachment; the route table
+and security group are found by their tag inside the VPC. Duplicate matches stop
+the commands. Reruns verify existing settings and stop on conflicts rather than
+replace routes, firewall rules or SSH keys. A fresh subnet's association with the
+new public route table is intentional; do not select a shared workload subnet.
+
+Paste the whole block into CloudShell Bash. It stops on errors without rolling
+back earlier creations. After a partial failure, inspect the printed resources
+and fix the incomplete resource before rerunning; tag lookup avoids duplicating it.
 
 ```bash
-aws ec2 import-key-pair --region us-east-1 \
-  --key-name backup-validator-operator \
-  --public-key-material fileb://operator.pub
+(
+set -euo pipefail
+export AWS_PAGER=''
+umask 077
+EXPECTED_ACCOUNT='REPLACE_WITH_12_DIGIT_ACCOUNT_ID'
+REGION='us-east-1'
+AZ='us-east-1a'
+NETWORK_NAME='backup-validator'
+VPC_CIDR='10.80.0.0/16'
+SUBNET_CIDR='10.80.1.0/24'
+OPERATOR_CIDR='REPLACE_WITH_YOUR_PUBLIC_IP/32'
+SITE_SSH_CIDRS=('REPLACE_WITH_WEBSITE_SSH_IP/32')
+KEY_NAME='backup-validator-operator'
+PUBLIC_KEY_FILE="$HOME/operator.pub"
+VPC_ID=''
+SUBNET_ID=''
+
+fail() { echo "$*" >&2; exit 1; }
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+[[ "$EXPECTED_ACCOUNT" =~ ^[0-9]{12}$ && "$ACCOUNT_ID" == "$EXPECTED_ACCOUNT" ]] || fail 'Wrong or unset account ID.'
+[[ "$NETWORK_NAME" =~ ^[A-Za-z0-9_-]+$ ]] || fail 'Use letters, digits, underscores or hyphens for NETWORK_NAME.'
+[[ "$OPERATOR_CIDR" != REPLACE* && ${#SITE_SSH_CIDRS[@]} -gt 0 ]] || fail 'Set operator and website SSH CIDRs.'
+for cidr in "$OPERATOR_CIDR" "${SITE_SSH_CIDRS[@]}"; do
+  [[ "$cidr" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]] || fail "Invalid IPv4 CIDR: $cidr"
+done
+[[ "$OPERATOR_CIDR" == */32 ]] || fail 'Use your workstation public IPv4 /32 for inbound SSH.'
+[[ -s "$PUBLIC_KEY_FILE" ]] || fail 'Upload operator.pub to CloudShell first.'
+ssh-keygen -lf "$PUBLIC_KEY_FILE" > /dev/null
+WORK_DIR=$(mktemp -d)
+trap 'rm -rf -- "$WORK_DIR"' EXIT
+ec2() { aws ec2 "$@" --region "$REGION" --output json; }
+one() { jq -r 'if length == 0 then "" elif length == 1 then .[0] else error("Multiple matches: supply explicit IDs or unique tags") end'; }
+
+if [[ -z "$VPC_ID" ]]; then
+  VPC_ID=$(ec2 describe-vpcs --filters "Name=tag:BackupNetwork,Values=$NETWORK_NAME" | jq '[.Vpcs[].VpcId]' | one)
+fi
+if [[ -z "$VPC_ID" ]]; then
+  VPC_ID=$(ec2 create-vpc --cidr-block "$VPC_CIDR" \
+    --tag-specifications "ResourceType=vpc,Tags=[{Key=BackupNetwork,Value=$NETWORK_NAME}]" | jq -r '.Vpc.VpcId')
+  ec2 wait vpc-available --vpc-ids "$VPC_ID"
+  ec2 modify-vpc-attribute --vpc-id "$VPC_ID" --enable-dns-support '{"Value":true}'
+  ec2 modify-vpc-attribute --vpc-id "$VPC_ID" --enable-dns-hostnames '{"Value":true}'
+fi
+printf 'VPC_ID=%s\n' "$VPC_ID"
+for attribute in enableDnsSupport enableDnsHostnames; do
+  ec2 describe-vpc-attribute --vpc-id "$VPC_ID" --attribute "$attribute" \
+    | jq -e '[.[] | objects | .Value?] | any(. == true)' > /dev/null || fail "Enable $attribute on $VPC_ID before proceeding."
+done
+
+if [[ -z "$SUBNET_ID" ]]; then
+  SUBNET_ID=$(ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" \
+    "Name=tag:BackupNetwork,Values=$NETWORK_NAME" | jq '[.Subnets[].SubnetId]' | one)
+fi
+if [[ -z "$SUBNET_ID" ]]; then
+  SUBNET_ID=$(ec2 create-subnet --vpc-id "$VPC_ID" --cidr-block "$SUBNET_CIDR" --availability-zone "$AZ" \
+    --tag-specifications "ResourceType=subnet,Tags=[{Key=BackupNetwork,Value=$NETWORK_NAME}]" | jq -r '.Subnet.SubnetId')
+  ec2 wait subnet-available --subnet-ids "$SUBNET_ID"
+fi
+ec2 describe-subnets --subnet-ids "$SUBNET_ID" \
+  | jq -e --arg vpc "$VPC_ID" --arg cidr "$SUBNET_CIDR" --arg az "$AZ" \
+    '.Subnets | length == 1 and .[0].VpcId == $vpc and .[0].CidrBlock == $cidr and .[0].AvailabilityZone == $az' > /dev/null \
+  || fail 'Subnet does not match VPC, CIDR and AZ; correct the inputs.'
+printf 'SUBNET_ID=%s\n' "$SUBNET_ID"
+
+IGW_ID=$(ec2 describe-internet-gateways --filters "Name=attachment.vpc-id,Values=$VPC_ID" | jq '[.InternetGateways[].InternetGatewayId]' | one)
+if [[ -z "$IGW_ID" ]]; then
+  IGW_ID=$(ec2 describe-internet-gateways --filters "Name=tag:BackupNetwork,Values=$NETWORK_NAME" | jq '[.InternetGateways[].InternetGatewayId]' | one)
+  if [[ -z "$IGW_ID" ]]; then
+    IGW_ID=$(ec2 create-internet-gateway \
+      --tag-specifications "ResourceType=internet-gateway,Tags=[{Key=BackupNetwork,Value=$NETWORK_NAME}]" | jq -r '.InternetGateway.InternetGatewayId')
+  fi
+  # Fails if the tagged gateway belongs to another VPC; never detach it.
+  ec2 attach-internet-gateway --internet-gateway-id "$IGW_ID" --vpc-id "$VPC_ID"
+fi
+ROUTE_TABLE_ID=$(ec2 describe-route-tables --filters "Name=vpc-id,Values=$VPC_ID" \
+  "Name=tag:BackupNetwork,Values=$NETWORK_NAME" | jq '[.RouteTables[].RouteTableId]' | one)
+if [[ -z "$ROUTE_TABLE_ID" ]]; then
+  ROUTE_TABLE_ID=$(ec2 create-route-table --vpc-id "$VPC_ID" \
+    --tag-specifications "ResourceType=route-table,Tags=[{Key=BackupNetwork,Value=$NETWORK_NAME}]" | jq -r '.RouteTable.RouteTableId')
+fi
+ec2 describe-route-tables --route-table-ids "$ROUTE_TABLE_ID" > "$WORK_DIR/routes.json"
+DEFAULT_ROUTES=$(jq '[.RouteTables[0].Routes[] | select(.DestinationCidrBlock == "0.0.0.0/0")]' "$WORK_DIR/routes.json")
+if [[ "$DEFAULT_ROUTES" == '[]' ]]; then
+  ec2 create-route --route-table-id "$ROUTE_TABLE_ID" --destination-cidr-block 0.0.0.0/0 --gateway-id "$IGW_ID"
+else
+  jq -e --arg gateway "$IGW_ID" 'length == 1 and .[0].GatewayId == $gateway and .[0].State == "active"' \
+    <<< "$DEFAULT_ROUTES" > /dev/null || fail 'Default route conflicts with the intended internet gateway.'
+fi
+ASSOCIATED=$(ec2 describe-route-tables --filters "Name=association.subnet-id,Values=$SUBNET_ID" | jq '[.RouteTables[].RouteTableId]' | one)
+if [[ -z "$ASSOCIATED" ]]; then
+  ec2 associate-route-table --route-table-id "$ROUTE_TABLE_ID" --subnet-id "$SUBNET_ID"
+else
+  [[ "$ASSOCIATED" == "$ROUTE_TABLE_ID" ]] || fail 'Subnet is explicitly associated with a different route table.'
+fi
+
+jq -n --arg cidr "$OPERATOR_CIDR" \
+  '[{IpProtocol:"tcp",FromPort:22,ToPort:22,IpRanges:[{CidrIp:$cidr}]}]' > "$WORK_DIR/ingress.json"
+jq -n --args '[{IpProtocol:"tcp",FromPort:80,ToPort:80,IpRanges:[{CidrIp:"0.0.0.0/0"}]},
+  {IpProtocol:"tcp",FromPort:443,ToPort:443,IpRanges:[{CidrIp:"0.0.0.0/0"}]},
+  {IpProtocol:"tcp",FromPort:22,ToPort:22,IpRanges:($ARGS.positional | unique | map({CidrIp:.}))}]' \
+  "${SITE_SSH_CIDRS[@]}" > "$WORK_DIR/egress.json"
+SECURITY_GROUP_ID=$(ec2 describe-security-groups --filters "Name=vpc-id,Values=$VPC_ID" \
+  "Name=tag:BackupNetwork,Values=$NETWORK_NAME" | jq '[.SecurityGroups[].GroupId]' | one)
+if [[ -z "$SECURITY_GROUP_ID" ]]; then
+  SECURITY_GROUP_ID=$(ec2 create-security-group --vpc-id "$VPC_ID" --group-name "$NETWORK_NAME-ssh" \
+    --description 'Backup machine SSH and upload access' \
+    --tag-specifications "ResourceType=security-group,Tags=[{Key=BackupNetwork,Value=$NETWORK_NAME}]" | jq -r '.GroupId')
+  printf 'SECURITY_GROUP_ID=%s\n' "$SECURITY_GROUP_ID"
+  ec2 describe-security-groups --group-ids "$SECURITY_GROUP_ID" | jq '.SecurityGroups[0].IpPermissionsEgress' > "$WORK_DIR/default-egress.json"
+  if [[ $(jq length "$WORK_DIR/default-egress.json") -gt 0 ]]; then
+    ec2 revoke-security-group-egress --group-id "$SECURITY_GROUP_ID" --ip-permissions "file://$WORK_DIR/default-egress.json"
+  fi
+  ec2 authorize-security-group-ingress --group-id "$SECURITY_GROUP_ID" --ip-permissions "file://$WORK_DIR/ingress.json"
+  ec2 authorize-security-group-egress --group-id "$SECURITY_GROUP_ID" --ip-permissions "file://$WORK_DIR/egress.json"
+fi
+# Compare rule meaning, ignoring descriptions and AWS-added empty fields.
+NORMALIZE='map({IpProtocol,FromPort,ToPort,IpRanges:([.IpRanges[]?.CidrIp]|sort),Ipv6Ranges:([.Ipv6Ranges[]?.CidrIpv6]|sort),PrefixListIds:([.PrefixListIds[]?.PrefixListId]|sort),UserIdGroupPairs:(.UserIdGroupPairs // [])}) | sort_by(.IpProtocol,.FromPort,.ToPort)'
+ec2 describe-security-groups --group-ids "$SECURITY_GROUP_ID" > "$WORK_DIR/group.json"
+for direction in ingress egress; do
+  field=IpPermissions; [[ "$direction" == ingress ]] || field=IpPermissionsEgress
+  jq -S ".SecurityGroups[0].$field | $NORMALIZE" "$WORK_DIR/group.json" > "$WORK_DIR/actual.json"
+  jq -S "$NORMALIZE" "$WORK_DIR/$direction.json" > "$WORK_DIR/expected.json"
+  cmp -s "$WORK_DIR/actual.json" "$WORK_DIR/expected.json" || fail "Existing $direction rules differ; review $SECURITY_GROUP_ID rather than overwrite its rules."
+done
+
+ec2 describe-key-pairs --filters "Name=key-name,Values=$KEY_NAME" --include-public-key > "$WORK_DIR/key.json"
+if [[ $(jq '.KeyPairs | length' "$WORK_DIR/key.json") == 0 ]]; then
+  ec2 import-key-pair --key-name "$KEY_NAME" --public-key-material "fileb://$PUBLIC_KEY_FILE"
+else
+  LOCAL_KEY=$(awk 'NF >= 2 {print $1 " " $2; exit}' "$PUBLIC_KEY_FILE")
+  AWS_KEY=$(jq -r '.KeyPairs[0].PublicKey' "$WORK_DIR/key.json" | awk 'NF >= 2 {print $1 " " $2; exit}')
+  [[ "$LOCAL_KEY" == "$AWS_KEY" ]] || fail 'Existing key name has different public key material; use the correct key or another name.'
+fi
+printf '\nCopy these into IAM.md and your Ansible settings:\n'
+printf 'EXPECTED_ACCOUNT=%s\nREGION=%s\nSUBNET_ID=%s\nSECURITY_GROUP_ID=%s\nKEY_NAME=%s\n' \
+  "$ACCOUNT_ID" "$REGION" "$SUBNET_ID" "$SECURITY_GROUP_ID" "$KEY_NAME"
+printf 'Network references: VPC=%s IGW=%s ROUTE_TABLE=%s\n' "$VPC_ID" "$IGW_ID" "$ROUTE_TABLE_ID"
+)
 ```
 
-Only the public key goes to AWS. Keep the private key in WSL, outside this
-repository. [AWS key-pair documentation](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/create-key-pairs.html).
+This uses a public IPv4 address (requested by the launch playbook), an internet
+gateway and outbound TCP 22/80/443. No NAT gateway is needed. Keep the default
+network ACL or ensure custom ACLs allow traffic and its return paths. DNS must
+remain available through the VPC resolver. An existing subnet's custom ACL is not
+validated by these commands. Update reviewed security-group rules when your home
+IP or website SSH addresses change; reruns deliberately flag the mismatch.
 
-## 5. Apply IAM policies and launch with the new settings
+Now run [IAM setup](IAM.md) using the printed values and your bucket name. Network
+bootstrap requires EC2 create/attach/associate/route, DNS modification, security-group
+rule, key import, tagging and Describe permissions; these stay with the CloudShell
+administrator, not the everyday IAM user.
 
-Create or select the bucket, then follow the [CloudShell IAM setup](IAM.md).
-Use the same account, bucket, subnet, security group and key-pair name in both
-guides. Configure the single local profile `backup-validator`.
+## 3. Local WSL: configure and launch
 
-Create a local Ansible extra-vars file, for example
-`/tmp/backup-validator.yml`, with your actual values:
+After configuring the `backup-validator` profile in IAM setup, paste the printed
+values into this block. Store settings locally, outside the repository. Existing
+settings are retained; edit that file directly when changing infrastructure.
 
-```yaml
+```bash
+(
+set -euo pipefail
+mkdir -p "$HOME/.config/backup-validator"
+chmod 700 "$HOME/.config/backup-validator"
+SETTINGS="$HOME/.config/backup-validator/aws.yml"
+if [[ ! -e "$SETTINGS" ]]; then
+  (umask 077; cat > "$SETTINGS" <<YAML
 aws_region: us-east-1
 subnet_id: subnet-REPLACE
 security_group: sg-REPLACE
@@ -114,70 +224,88 @@ key_name: backup-validator-operator
 iam_profile: arn:aws:iam::ACCOUNT_ID:instance-profile/backup-validator-upload
 tag_name: backup_creator_tag
 backup_bucket: BUCKET_NAME
-ansible_ssh_private_key_file: /home/YOUR_USER/.ssh/backup-validator/operator
+ansible_ssh_private_key_file: $HOME/.ssh/backup-validator/operator
+YAML
+  )
+fi
+printf 'Review and replace placeholders in %s before launching.\n' "$SETTINGS"
+)
 ```
 
-The extra variable `ansible_ssh_private_key_file` overrides the hard-coded key
-path in both creation and discovery. Use this file for every controller playbook
-run, and preserve a private copy of the account configuration outside `/tmp`.
-Run from the repository root:
+Run the following from the repository root after filling in that file. If your
+private key has a passphrase, load it into an SSH agent first.
 
 ```bash
-AWS_PROFILE=backup-validator ansible-playbook aws/create-backup-machine.yml \
-  -e @/tmp/backup-validator.yml
-AWS_PROFILE=backup-validator ansible-playbook aws/configure-backup-machine.yml \
-  -e @/tmp/backup-validator.yml
-AWS_PROFILE=backup-validator ansible-playbook aws/prepare-backup-scripts.yml \
-  -e @/tmp/backup-validator.yml
+(
+set -euo pipefail
+SETTINGS="$HOME/.config/backup-validator/aws.yml"
+if grep -Eq 'REPLACE|ACCOUNT_ID|BUCKET_NAME' "$SETTINGS"; then
+  echo "Fill in $SETTINGS first." >&2; exit 1
+fi
+export AWS_PROFILE=backup-validator
+aws sts get-caller-identity
+ansible-playbook aws/create-backup-machine.yml -e "@$SETTINGS"
+ansible-playbook aws/configure-backup-machine.yml -e "@$SETTINGS"
+ansible-playbook aws/prepare-backup-scripts.yml -e "@$SETTINGS"
+)
 ```
 
-The launch playbook waits for SSH, so a timeout here calls for checking the public
-IP, route-table association, operator `/32`, key pair and private key. The Ubuntu
-AMI's SSH username is `ubuntu`. Verify the machine's SSH host-key fingerprint
-through a trusted channel such as the EC2 console system log before accepting it.
+Creation waits for SSH as `ubuntu`. A timeout calls for checking the instance's
+public IP, route-table association, operator `/32`, key pair and private key.
+Verify the machine's SSH host-key fingerprint through a trusted channel such as
+EC2 console output before accepting it. The creation playbook can terminate extra
+instances matching its tag; use a separate reviewed tag/policy for isolated tests.
 
-## 6. Establish backup-machine-to-website SSH access
+## 4. Website access: authorize the backup machine
 
-Configuration generates `/home/ubuntu/.ssh/id_rsa` and `id_rsa.pub` on EC2.
-Preparation copies the private site host variables and clones the repository.
-It does not install AWS access keys: uploads should use the EC2 instance role.
+Configuration creates a second key, `/home/ubuntu/.ssh/id_rsa`, **on EC2**. This key
+is for EC2-to-website access; your workstation key is for workstation-to-EC2 access.
+If the hosting provider restricts source IPs, allow the backup machine's public
+IPv4 address for SSH. A new machine or stop/start can change that address; update
+allowlists or separately configure an Elastic IP if a stable address is required.
 
-1. Record EC2's public IPv4 address. If the website host/provider filters SSH by
-   source address, allow that address for TCP 22 at the website end.
-2. The current ephemeral public IP can change after stop/start or replacement.
-   Update website allowlists each time. If a stable address is required, add an
-   Elastic IP allocation/association step and its separate bootstrap permissions
-   (`ec2:AllocateAddress`, `ec2:AssociateAddress`; cleanup needs the corresponding
-   disassociate/release actions). The present playbook does not manage Elastic IPs.
-3. Confirm the initial website login credentials in private `host_vars` are valid.
-   `backup-all-sites.yml` first installs EC2's public key into each configured
-   website user's `authorized_keys` using those existing credentials. It then
-   performs backups. Do not run the whole playbook just to test connectivity.
-4. To preflight key access without creating backups, install only EC2's public key
-   using the website's authorized administration method. From EC2, verify each
-   target with `ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/id_rsa USER@SSH_HOST true`.
-   Confirm the website host-key fingerprint before accepting it. Replace USER and
-   SSH_HOST with the site's actual settings. Never copy EC2's private key to the
-   website servers.
-5. On EC2, run `aws sts get-caller-identity` and confirm the uploader assumed-role
-   ARN. Then run `ansible-playbook backup-all-sites.yml -e backup_bucket=BUCKET_NAME`
-   from `/home/ubuntu/backup-validator` when ready for a real backup. Run the
-   downloader locally with the backup-validator profile and the same bucket
-   override, then restore and verify every site before enabling scheduled backups.
+SSH from WSL to the machine, substituting its public IP:
 
-The upload command currently disables SSH host-key checking; recording verified
-host keys is preparation for tightening that behavior, not a claim that this
-runbook has changed the command. Scheduling, source-server credential changes,
-and allowlist changes remain separate from AWS IAM permissions.
+```bash
+ssh -i "$HOME/.ssh/backup-validator/operator" ubuntu@BACKUP_MACHINE_PUBLIC_IP
+```
 
-## Bootstrap permissions
+On the backup machine, for each website, install its public key using the existing
+website login and test key-only access. Replace `SITE_USER` and `SITE_SSH_HOST`
+with the private host-variable values, and verify the website's host-key fingerprint
+before accepting it. If password login is unavailable, use the hosting provider's
+SSH-key administration interface to install the output of `cat ~/.ssh/id_rsa.pub`.
 
-Network creation requires only the actions used by your chosen setup: typically
-`ec2:CreateVpc`, `ec2:ModifyVpcAttribute`, `ec2:CreateSubnet`,
-`ec2:CreateInternetGateway`, `ec2:AttachInternetGateway`, `ec2:CreateRouteTable`,
-`ec2:CreateRoute`, `ec2:AssociateRouteTable`, `ec2:CreateSecurityGroup`,
-`ec2:AuthorizeSecurityGroupIngress`, `ec2:AuthorizeSecurityGroupEgress`,
-`ec2:RevokeSecurityGroupEgress` to replace default egress, `ec2:ImportKeyPair`,
-and scoped `ec2:CreateTags`, plus relevant Describe actions. Changing subnet-wide
-public-IP assignment additionally needs `ec2:ModifySubnetAttribute`. Keep these
-bootstrap permissions separate from the runtime policies.
+```bash
+ssh-copy-id -i ~/.ssh/id_rsa.pub SITE_USER@SITE_SSH_HOST
+ssh -o BatchMode=yes -o IdentitiesOnly=yes -i ~/.ssh/id_rsa SITE_USER@SITE_SSH_HOST true
+```
+
+Never copy either private key to the website servers. The backup playbook also
+installs the EC2 public key using the existing credentials in `host_vars`, but
+running it performs a real backup, not just a connectivity check.
+
+On EC2, confirm the upload role and perform a backup when ready:
+
+```bash
+aws sts get-caller-identity
+cd /home/ubuntu/backup-validator
+ansible-playbook backup-all-sites.yml -e backup_bucket=BUCKET_NAME
+```
+
+Back in the local repository, download and use the README's restore procedure:
+
+```bash
+AWS_PROFILE=backup-validator ansible-playbook download-latest-backups.yml \
+  -e "@$HOME/.config/backup-validator/aws.yml"
+```
+
+The upload command currently disables SSH host-key checking; this guide does not
+change that command. Keep verified host keys for subsequent hardening. Scheduling
+and failure notifications require separate configuration.
+
+## References
+
+- [Internet gateway requirements](https://docs.aws.amazon.com/vpc/latest/userguide/VPC_Internet_Gateway.html)
+- [Read existing EC2 public keys](https://docs.aws.amazon.com/cli/latest/reference/ec2/describe-key-pairs.html)
+- [Route-table queries](https://docs.aws.amazon.com/cli/latest/reference/ec2/describe-route-tables.html)

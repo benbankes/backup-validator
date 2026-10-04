@@ -243,7 +243,7 @@ keys on EC2: the AWS CLI there uses the upload instance role automatically.
 
 ## 3. Run and verify
 
-Follow [Networking and SSH setup](NETWORKING-SSH.md), sections 5–6, for the shared
+Follow [Networking and SSH setup](NETWORKING-SSH.md), sections 3–4, for the shared
 Ansible variables and machine launch/configuration commands. Specify the upload
 instance-profile ARN instead of the playbook's legacy profile default.
 
