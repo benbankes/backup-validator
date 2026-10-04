@@ -19,6 +19,8 @@
 - name: Backup site
   hosts: all
   gather_facts: false
+  vars:
+    backup_bucket: flextalk-backups
 
   tasks:
     - name: Clear old staging directories on target server
@@ -60,7 +62,7 @@
         {{ ansible_user }}@{{ ansible_host }} 
         "cat /home/{{ ansible_user }}/ansible-backup-archives/archive.tar.gz" 
         | aws s3 cp - 
-        s3://flextalk-backups/{{ inventory_hostname }}/{{ inventory_hostname }}-{{ lookup('ansible.builtin.pipe', 'date +%Y-%m-%d') }}.tar.gz
+        s3://{{ backup_bucket }}/{{ inventory_hostname }}/{{ inventory_hostname }}-{{ lookup('ansible.builtin.pipe', 'date +%Y-%m-%d') }}.tar.gz
       args:
         executable: /bin/bash
       delegate_to: localhost

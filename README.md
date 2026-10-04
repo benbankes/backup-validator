@@ -43,7 +43,7 @@ Configure your download credentials separately, as your normal WSL user:
 
 ```bash
 aws configure --profile backup-validator
-aws s3 ls s3://flextalk-backups/ --profile backup-validator
+aws s3api list-objects-v2 --bucket flextalk-backups --prefix flextalk.org/ --profile backup-validator
 ```
 
 Credentials stay in your user's AWS configuration, outside this repository.
@@ -245,3 +245,6 @@ Both commands provide built-in help:
 
 Production backup and AWS-machine playbooks remain separate from local recovery.
 Consult the playbooks under `aws/` only when working on that infrastructure.
+
+See [AWS IAM setup](aws/IAM.md) for copy/paste CloudShell commands to configure
+one local AWS profile and the EC2 upload role.
