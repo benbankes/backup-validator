@@ -62,6 +62,14 @@
       register: tar_result
       failed_when: tar_result.rc not in [0, 1] # 0 = Success, 1 = Minor, non-fatal anomalies, e.g. "Some files differ" (e.g. from failure to read some files)
 
+    - name: Measure the completed archive for S3 multipart upload sizing
+      ansible.builtin.stat:
+        path: "/home/{{ ansible_user }}/ansible-backup-archives/archive.tar.gz"
+        get_checksum: false
+        get_mime: false
+        get_attributes: false
+      register: backup_archive
+
     # Leverage the orchestrator to pipe/stream the archive directly from the production host to S3
     - name: Pipe archive download directly into Amazon S3 simultaneously
       ansible.builtin.shell: >
@@ -72,6 +80,7 @@
         "cat /home/{{ ansible_user }}/ansible-backup-archives/archive.tar.gz" 
         | aws s3 cp - 
         s3://{{ backup_bucket }}/{{ inventory_hostname }}/{{ inventory_hostname }}-{{ lookup('ansible.builtin.pipe', 'date +%Y-%m-%d') }}.tar.gz
+        --expected-size {{ backup_archive.stat.size }}
       args:
         executable: /bin/bash
       delegate_to: localhost
