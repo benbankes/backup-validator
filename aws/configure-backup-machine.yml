@@ -5,9 +5,6 @@
   hosts: localhost
   connection: local
   gather_facts: false
-  vars:
-    aws_region: "us-east-1"
-    tag_name: "backup_creator_tag"
   tasks:
     - ansible.builtin.include_tasks: tasks/discover-ip.yml
 

@@ -1,9 +1,10 @@
 # Networking and SSH setup
 
-Run section 1 in **local WSL**, section 2 in **administrator CloudShell**, and
-section 3 back in WSL. Section 4 connects the backup machine to website servers.
-The CloudShell commands create networking and import a public key; they do not
-launch EC2 or create the S3 bucket. Use [IAM setup](IAM.md) between sections 2 and 3.
+This guide owns network creation and SSH authorization. Start with the
+[README shared settings](../README.md#shared-aws-settings), then run section 1 in
+local WSL and section 2 in administrator CloudShell. After the README's machine
+configuration steps, use section 3 for website SSH access. Machine lifecycle,
+backups and downloads are documented only in the README.
 
 ## 1. Local WSL: prepare the operator SSH key
 
@@ -14,7 +15,7 @@ Choose a passphrase when prompted and load it with `ssh-add` before using Ansibl
 ```bash
 (
 set -euo pipefail
-KEY_FILE="$HOME/.ssh/backup-validator/operator"
+KEY_FILE=$(jq -er '.ansible_ssh_private_key_file' "$HOME/.config/backup-validator/aws.yml")
 mkdir -p "$(dirname "$KEY_FILE")"
 chmod 700 "$(dirname "$KEY_FILE")"
 if [[ ! -f "$KEY_FILE" ]]; then
@@ -29,11 +30,14 @@ printf 'Upload only this public file to CloudShell: %s.pub\n' "$KEY_FILE"
 
 Use CloudShell's **Actions → Upload file** to upload `operator.pub`. If Windows'
 file picker cannot browse your WSL files, use the distro's `\\wsl.localhost\` path.
-Do not upload `operator` (the private key).
+Do not upload the private key. Also upload your shared `aws.yml` to CloudShell.
+If you chose a different key filename, update `PUBLIC_KEY_FILE` below to its
+uploaded public filename.
 
 ## 2. CloudShell: create or reuse the network
 
-Edit the variables, including your workstation's public IPv4 `/32` and the
+The account, region and key name come from the uploaded settings. Edit only the
+network bootstrap inputs below, including your workstation's public IPv4 `/32` and the
 **website SSH servers'** IPv4 CIDRs (from `ansible_host`, not CDN/web addresses).
 Choose private CIDRs that do not overlap connected networks. The example uses
 `us-east-1`; choose an available zone supporting the intended instance type.
@@ -55,15 +59,16 @@ and fix the incomplete resource before rerunning; tag lookup avoids duplicating 
 set -euo pipefail
 export AWS_PAGER=''
 umask 077
-EXPECTED_ACCOUNT='REPLACE_WITH_12_DIGIT_ACCOUNT_ID'
-REGION='us-east-1'
+SETTINGS_FILE="$HOME/aws.yml"
+EXPECTED_ACCOUNT=$(jq -er '.aws_account_id' "$SETTINGS_FILE")
+REGION=$(jq -er '.aws_region' "$SETTINGS_FILE")
 AZ='us-east-1a'
 NETWORK_NAME='backup-validator'
 VPC_CIDR='10.80.0.0/16'
 SUBNET_CIDR='10.80.1.0/24'
 OPERATOR_CIDR='REPLACE_WITH_YOUR_PUBLIC_IP/32'
 SITE_SSH_CIDRS=('REPLACE_WITH_WEBSITE_SSH_IP/32')
-KEY_NAME='backup-validator-operator'
+KEY_NAME=$(jq -er '.key_name' "$SETTINGS_FILE")
 PUBLIC_KEY_FILE="$HOME/operator.pub"
 VPC_ID=''
 SUBNET_ID=''
@@ -71,6 +76,7 @@ SUBNET_ID=''
 fail() { echo "$*" >&2; exit 1; }
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 [[ "$EXPECTED_ACCOUNT" =~ ^[0-9]{12}$ && "$ACCOUNT_ID" == "$EXPECTED_ACCOUNT" ]] || fail 'Wrong or unset account ID.'
+[[ "$AZ" == "$REGION"* ]] || fail 'Choose an availability zone in the configured region.'
 [[ "$NETWORK_NAME" =~ ^[A-Za-z0-9_-]+$ ]] || fail 'Use letters, digits, underscores or hyphens for NETWORK_NAME.'
 [[ "$OPERATOR_CIDR" != REPLACE* && ${#SITE_SSH_CIDRS[@]} -gt 0 ]] || fail 'Set operator and website SSH CIDRs.'
 for cidr in "$OPERATOR_CIDR" "${SITE_SSH_CIDRS[@]}"; do
@@ -184,8 +190,8 @@ else
   AWS_KEY=$(jq -r '.KeyPairs[0].PublicKey' "$WORK_DIR/key.json" | awk 'NF >= 2 {print $1 " " $2; exit}')
   [[ "$LOCAL_KEY" == "$AWS_KEY" ]] || fail 'Existing key name has different public key material; use the correct key or another name.'
 fi
-printf '\nCopy these into IAM.md and your Ansible settings:\n'
-printf 'EXPECTED_ACCOUNT=%s\nREGION=%s\nSUBNET_ID=%s\nSECURITY_GROUP_ID=%s\nKEY_NAME=%s\n' \
+printf '\nRecord these values in your local aws.yml, then upload the updated file:\n'
+printf 'aws_account_id=%s\naws_region=%s\nsubnet_id=%s\nsecurity_group=%s\nkey_name=%s\n' \
   "$ACCOUNT_ID" "$REGION" "$SUBNET_ID" "$SECURITY_GROUP_ID" "$KEY_NAME"
 printf 'Network references: VPC=%s IGW=%s ROUTE_TABLE=%s\n' "$VPC_ID" "$IGW_ID" "$ROUTE_TABLE_ID"
 )
@@ -198,65 +204,12 @@ remain available through the VPC resolver. An existing subnet's custom ACL is no
 validated by these commands. Update reviewed security-group rules when your home
 IP or website SSH addresses change; reruns deliberately flag the mismatch.
 
-Now run [IAM setup](IAM.md) using the printed values and your bucket name. Network
+Return to the [README setup order](../README.md#aws-setup-order) for bucket and IAM setup. Network
 bootstrap requires EC2 create/attach/associate/route, DNS modification, security-group
 rule, key import, tagging and Describe permissions; these stay with the CloudShell
 administrator, not the everyday IAM user.
 
-## 3. Local WSL: configure and launch
-
-After configuring the `backup-validator` profile in IAM setup, paste the printed
-values into this block. Store settings locally, outside the repository. Existing
-settings are retained; edit that file directly when changing infrastructure.
-
-```bash
-(
-set -euo pipefail
-mkdir -p "$HOME/.config/backup-validator"
-chmod 700 "$HOME/.config/backup-validator"
-SETTINGS="$HOME/.config/backup-validator/aws.yml"
-if [[ ! -e "$SETTINGS" ]]; then
-  (umask 077; cat > "$SETTINGS" <<YAML
-aws_region: us-east-1
-subnet_id: subnet-REPLACE
-security_group: sg-REPLACE
-key_name: backup-validator-operator
-iam_profile: arn:aws:iam::ACCOUNT_ID:instance-profile/backup-validator-upload
-tag_name: backup_creator_tag
-backup_bucket: BUCKET_NAME
-ansible_ssh_private_key_file: $HOME/.ssh/backup-validator/operator
-YAML
-  )
-fi
-printf 'Review and replace placeholders in %s before launching.\n' "$SETTINGS"
-)
-```
-
-Run the following from the repository root after filling in that file. If your
-private key has a passphrase, load it into an SSH agent first.
-
-```bash
-(
-set -euo pipefail
-SETTINGS="$HOME/.config/backup-validator/aws.yml"
-if grep -Eq 'REPLACE|ACCOUNT_ID|BUCKET_NAME' "$SETTINGS"; then
-  echo "Fill in $SETTINGS first." >&2; exit 1
-fi
-export AWS_PROFILE=backup-validator
-aws sts get-caller-identity
-ansible-playbook aws/create-backup-machine.yml -e "@$SETTINGS"
-ansible-playbook aws/configure-backup-machine.yml -e "@$SETTINGS"
-ansible-playbook aws/prepare-backup-scripts.yml -e "@$SETTINGS"
-)
-```
-
-Creation waits for SSH as `ubuntu`. A timeout calls for checking the instance's
-public IP, route-table association, operator `/32`, key pair and private key.
-Verify the machine's SSH host-key fingerprint through a trusted channel such as
-EC2 console output before accepting it. The creation playbook can terminate extra
-instances matching its tag; use a separate reviewed tag/policy for isolated tests.
-
-## 4. Website access: authorize the backup machine
+## 3. Website access: authorize the backup machine
 
 Configuration creates a second key, `/home/ubuntu/.ssh/id_rsa`, **on EC2**. This key
 is for EC2-to-website access; your workstation key is for workstation-to-EC2 access.
@@ -267,7 +220,7 @@ allowlists or separately configure an Elastic IP if a stable address is required
 SSH from WSL to the machine, substituting its public IP:
 
 ```bash
-ssh -i "$HOME/.ssh/backup-validator/operator" ubuntu@BACKUP_MACHINE_PUBLIC_IP
+ssh -i "$(jq -er '.ansible_ssh_private_key_file' "$HOME/.config/backup-validator/aws.yml")" ubuntu@BACKUP_MACHINE_PUBLIC_IP
 ```
 
 On the backup machine, for each website, install its public key using the existing
@@ -285,20 +238,8 @@ Never copy either private key to the website servers. The backup playbook also
 installs the EC2 public key using the existing credentials in `host_vars`, but
 running it performs a real backup, not just a connectivity check.
 
-On EC2, confirm the upload role and perform a backup when ready:
-
-```bash
-aws sts get-caller-identity
-cd /home/ubuntu/backup-validator
-ansible-playbook backup-all-sites.yml -e backup_bucket=BUCKET_NAME
-```
-
-Back in the local repository, download and use the README's restore procedure:
-
-```bash
-AWS_PROFILE=backup-validator ansible-playbook download-latest-backups.yml \
-  -e "@$HOME/.config/backup-validator/aws.yml"
-```
+Return to the [README](../README.md#aws-operations) to run backups and verify
+restoration after website access works.
 
 The upload command currently disables SSH host-key checking; this guide does not
 change that command. Keep verified host keys for subsequent hardening. Scheduling

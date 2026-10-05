@@ -6,6 +6,17 @@
 #   - Put web files in their own folder.
 # - Upload it to S3
 
+- name: Validate backup destination before accessing production
+  hosts: localhost
+  any_errors_fatal: true
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Validate backup settings and account
+      ansible.builtin.include_tasks: tasks/validate-aws-settings.yml
+      vars:
+        aws_required_settings: [backup_bucket]
+
 - name: Grant remote access to machines from which backups are being taken
   hosts: all
   gather_facts: false
@@ -19,8 +30,6 @@
 - name: Backup site
   hosts: all
   gather_facts: false
-  vars:
-    backup_bucket: flextalk-backups
 
   tasks:
     - name: Clear old staging directories on target server
@@ -69,3 +78,5 @@
       # This block passes the password directly into memory, hiding it from process logs
       environment:
         SSHPASS: "{{ ansible_password }}"
+        AWS_DEFAULT_REGION: "{{ aws_region }}"
+        AWS_REGION: "{{ aws_region }}"

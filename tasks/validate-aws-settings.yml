@@ -1,0 +1,38 @@
+---
+# Include before AWS operations (and before any production backup work).
+- name: Require explicit AWS settings
+  ansible.builtin.assert:
+    that:
+      - vars[item] is defined
+      - vars[item] | string | length > 0
+      - "'REPLACE' not in (vars[item] | string)"
+    fail_msg: "Set {{ item }} in your AWS settings file and pass -e @/path/to/aws.yml."
+  loop: "{{ ['aws_account_id', 'aws_region'] + (aws_required_settings | default([])) }}"
+
+- name: Validate AWS account and region formats
+  ansible.builtin.assert:
+    that:
+      - aws_account_id | string is match('^[0-9]{12}$')
+      - aws_region is match('^[a-z]{2}-[a-z]+-[0-9]+$')
+    fail_msg: Use an explicit account ID and commercial AWS region in your settings file.
+
+- name: Check the active AWS identity before proceeding
+  ansible.builtin.command:
+    argv:
+      - aws
+      - sts
+      - get-caller-identity
+      - --region
+      - "{{ aws_region }}"
+      - --query
+      - Account
+      - --output
+      - text
+  register: backup_caller_account
+  changed_when: false
+  check_mode: false
+
+- name: Require credentials for the configured account
+  ansible.builtin.assert:
+    that: backup_caller_account.stdout | trim == aws_account_id | string
+    fail_msg: AWS credentials belong to a different account than aws_account_id.

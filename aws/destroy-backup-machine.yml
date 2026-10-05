@@ -1,32 +1,36 @@
-# This playbook can be used to terminate teh EC2 instance which performs backups
-
-# --- Dynamic AWS Discovery Block ---
-- name: Discover active backup orchestrator IP from AWS API
-  hosts: localhost
-  connection: local
-  gather_facts: false
-  vars:
-    aws_region: "us-east-1"
-    tag_name: "backup_creator_tag"
-  tasks:
-    - ansible.builtin.include_tasks: tasks/discover-ip.yml
-
-- name: Destroy backup machine
+---
+- name: Destroy the uniquely identified backup machine
   hosts: localhost
   connection: local
   gather_facts: false
   tasks:
-    - name: Get running instances
+    - name: Validate destruction settings and account
+      ansible.builtin.include_tasks: ../tasks/validate-aws-settings.yml
+      vars:
+        aws_required_settings: [tag_name]
+
+    - name: Find matching machines including stopped machines
       amazon.aws.ec2_instance_info:
-        region: us-east-1
+        region: "{{ aws_region }}"
         filters:
-          "tag:Name": backup_creator_tag
-          "instance-state-name": running
-      register: ec2
+          tag:Name: "{{ tag_name }}"
+          instance-state-name: [pending, running, stopping, stopped, shutting-down]
+      register: backup_machines
 
-    - name: Terminate first instance (should only be one)
+    - name: Refuse to choose between multiple machines
+      ansible.builtin.assert:
+        that: backup_machines.instances | length <= 1
+        fail_msg: Multiple machines match the configured tag; inspect them before terminating anything.
+
+    - name: Terminate the matching machine
       amazon.aws.ec2_instance:
-        region: us-east-1
+        region: "{{ aws_region }}"
         state: absent
-        instance_ids: "{{[ec2.instances[0].instance_id]}}"
+        instance_ids: "{{ backup_machines.instances | map(attribute='instance_id') | list }}"
         wait: true
+      when: backup_machines.instances | length == 1
+
+    - name: Report when no machine needs termination
+      ansible.builtin.debug:
+        msg: No nonterminated machine matches the configured tag.
+      when: backup_machines.instances | length == 0

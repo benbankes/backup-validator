@@ -1,43 +1,72 @@
-# This playbook can be used to create a new EC2 instance which will perform backups
-
-# Create backup machine at aws with tag
+---
 - name: Create backup machine
   hosts: localhost
   connection: local
   gather_facts: false
-  vars:
-    aws_region: "us-east-1"
-    #aws_zone: "us-east-1f"
-    subnet_id: "subnet-31b23e3d"
-    key_name: "MyEc2KeyPair"
-    security_group: "SshSecurityGroup"
-    instance_type: "c6i.large"
-    iam_profile: "s3-admin-access"
-    tag_name: "backup_creator_tag"
-
   tasks:
-    - name: Fetch latest official Ubuntu 26.04 Minimal AMI
+    - name: Validate deployment settings and account
+      ansible.builtin.include_tasks: ../tasks/validate-aws-settings.yml
+      vars:
+        aws_required_settings:
+          - subnet_id
+          - security_group
+          - key_name
+          - instance_type
+          - ami_id
+          - root_volume_size
+          - upload_role
+          - tag_name
+          - ansible_ssh_private_key_file
+
+    - name: Validate launch settings
+      ansible.builtin.assert:
+        that:
+          - ami_id is match('^ami-[a-f0-9]+$')
+          - root_volume_size | int >= 8
+          - root_volume_size | int == root_volume_size
+          - root_volume_size | int <= 16384
+          - upload_role is match('^[A-Za-z0-9_+=,.@-]+$')
+        fail_msg: Supply a pinned AMI, valid upload role name and gp3 root volume size.
+
+    - name: Inspect the pinned official Ubuntu AMI
       amazon.aws.ec2_ami_info:
         region: "{{ aws_region }}"
-        owners: ["099720109477"]  # Official Canonical AWS Account ID
-        filters:
-          name: "ubuntu-minimal/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-minimal-*"
-          architecture: "x86_64"
-          state: "available"
+        image_ids: ["{{ ami_id }}"]
+        owners: ["099720109477"]
       register: ubuntu_ami
 
-    - name: Set target AMI ID fact
-      ansible.builtin.set_fact:
-        target_ami: "{{ ubuntu_ami.images | sort(attribute='creation_date') | last }}"
+    - name: Require the supported Ubuntu platform
+      ansible.builtin.assert:
+        that:
+          - ubuntu_ami.images | length == 1
+          - ubuntu_ami.images[0].state == 'available'
+          - ubuntu_ami.images[0].architecture == 'x86_64'
+          - ubuntu_ami.images[0].name is match('^ubuntu-minimal/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-minimal-')
+        fail_msg: Pin an available Canonical Ubuntu 26.04 minimal x86_64 AMI in this region.
 
-    - name: Provision an EC2 instance
+    - name: Check for existing machines with the configured tag
+      amazon.aws.ec2_instance_info:
+        region: "{{ aws_region }}"
+        filters:
+          tag:Name: "{{ tag_name }}"
+          instance-state-name: [pending, running, stopping, stopped, shutting-down]
+      register: existing_backup_machines
+
+    - name: Refuse ambiguous or inactive matches
+      ansible.builtin.assert:
+        that:
+          - existing_backup_machines.instances | length <= 1
+          - existing_backup_machines.instances | rejectattr('state.name', 'in', ['pending', 'running']) | list | length == 0
+        fail_msg: Multiple or inactive matching machines exist; inspect them before creating or replacing a machine.
+
+    - name: Provision the configured EC2 instance
       amazon.aws.ec2_instance:
         region: "{{ aws_region }}"
         vpc_subnet_id: "{{ subnet_id }}"
         key_name: "{{ key_name }}"
         security_groups: "{{ security_group }}"
         instance_type: "{{ instance_type }}"
-        image_id: "{{ target_ami.image_id }}"
+        image_id: "{{ ami_id }}"
         wait: true
         exact_count: 1
         filters:
@@ -48,31 +77,31 @@
         network_interfaces:
           - device_index: 0
             assign_public_ip: true
-        iam_instance_profile: "{{ iam_profile }}"
+        iam_instance_profile: "arn:aws:iam::{{ aws_account_id }}:instance-profile/{{ upload_role }}"
         volumes:
-          - device_name: /dev/sda1
+          - device_name: "{{ ubuntu_ami.images[0].root_device_name }}"
             ebs:
               volume_type: gp3
-              volume_size: 100
+              volume_size: "{{ root_volume_size | int }}"
               delete_on_termination: true
-              throughput: 125  # Matches the 12.5 Gbps network pipe of c6i.large
-              iops: 3000       # Prevents disk bottlenecks during processing
+              throughput: 125
+              iops: 3000
       register: ec2_result
 
-    - name: Add instance to dynamic in-memory inventory
+    - name: Add instance to dynamic inventory
       ansible.builtin.add_host:
         name: "{{ item.public_ip_address }}"
         groups: mine
         ansible_user: ubuntu
-        ansible_ssh_private_key_file: "~/.ssh/personal-aws/MyEc2KeyPair.pem"
+        ansible_ssh_private_key_file: "{{ ansible_ssh_private_key_file }}"
       loop: "{{ ec2_result.instances }}"
       when: item.public_ip_address is defined
 
-- name: Validate and configure backup node
+- name: Wait for backup machine SSH
   hosts: mine
   gather_facts: false
   tasks:
-    - name: Wait for authenticated SSH handshake to clear
+    - name: Wait for authenticated SSH
       ansible.builtin.wait_for_connection:
         delay: 5
         timeout: 300

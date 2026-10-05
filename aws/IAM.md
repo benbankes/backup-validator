@@ -14,13 +14,15 @@ limited to the backup bucket. AWS maintains the managed read-only policy.
 
 Use AWS CloudShell while signed in as an administrator in the intended account.
 The commands below manage IAM; the everyday user does not receive IAM management
-permissions. Create/select the S3 bucket, subnet, security group and SSH key first;
-see [Networking and SSH setup](NETWORKING-SSH.md). Use SSE-S3 encryption, enable
-bucket versioning and Block Public Access, and choose retention/lifecycle rules.
+permissions. Complete the [README setup sequence](../README.md#aws-setup-order)
+first: select networking, create/verify the bucket, and pin an AMI in `aws.yml`.
 Customer-managed KMS encryption needs additional key permissions not supplied here.
 
 These commands use standard AWS commercial-region ARNs. Supply your account and
-resource IDs and keep `SITES` aligned with the repository's `hosts` inventory.
+resource IDs through the shared settings file. Upload your local `aws.yml` and
+the repository's `hosts` file to CloudShell before running these commands; do not
+maintain a separate site list. `hosts` must contain one site hostname per line,
+with optional blank/comment lines (the repository's inventory format).
 The user, role and policy names below should be dedicated to this repository.
 For an existing user or role, unrelated policies are preserved; user group
 memberships and access keys are also preserved. These may grant additional
@@ -30,8 +32,8 @@ resources would also be affected.
 
 ## 1. Create or update access in CloudShell
 
-Edit the variables, then paste the entire block into **CloudShell Bash**. It
-checks the account, resolves the same Ubuntu AMI as the launch playbook, creates
+Paste the entire block into **CloudShell Bash**, adjusting only the uploaded file
+paths if needed. It checks the account, validates the pinned AMI, creates
 missing IAM resources and applies the policies. It stops on errors; IAM changes
 are not transactional, so inspect any partial changes before retrying. Temporary
 JSON is removed on exit; no generated policy files are maintained in the repo.
@@ -42,22 +44,31 @@ set -euo pipefail
 export AWS_PAGER=''
 umask 077
 
-EXPECTED_ACCOUNT='REPLACE_WITH_12_DIGIT_ACCOUNT_ID'
-REGION='us-east-1'
-USER_NAME='backup-operator'
-BUCKET='REPLACE_WITH_BUCKET_NAME'
-SUBNET_ID='REPLACE_WITH_SUBNET_ID'
-SECURITY_GROUP_ID='REPLACE_WITH_SECURITY_GROUP_ID'
-KEY_NAME='backup-validator-operator'
-INSTANCE_TYPE='c6i.large'
-MACHINE_TAG='backup_creator_tag'
-UPLOAD_ROLE='backup-validator-upload'
-POLICY_NAME='backup-validator-operations'
-SITES=(buscadedios.org flextalk.org pursuegod.org pursuegodkids.org)
+SETTINGS_FILE="$HOME/aws.yml"
+INVENTORY_FILE="$HOME/hosts"
+EXPECTED_ACCOUNT=$(jq -er '.aws_account_id' "$SETTINGS_FILE")
+REGION=$(jq -er '.aws_region' "$SETTINGS_FILE")
+USER_NAME=$(jq -er '.iam_user_name' "$SETTINGS_FILE")
+BUCKET=$(jq -er '.backup_bucket' "$SETTINGS_FILE")
+SUBNET_ID=$(jq -er '.subnet_id' "$SETTINGS_FILE")
+SECURITY_GROUP_ID=$(jq -er '.security_group' "$SETTINGS_FILE")
+KEY_NAME=$(jq -er '.key_name' "$SETTINGS_FILE")
+INSTANCE_TYPE=$(jq -er '.instance_type' "$SETTINGS_FILE")
+MACHINE_TAG=$(jq -er '.tag_name' "$SETTINGS_FILE")
+UPLOAD_ROLE=$(jq -er '.upload_role' "$SETTINGS_FILE")
+POLICY_NAME=$(jq -er '.iam_policy_name' "$SETTINGS_FILE")
+AMI_ID=$(jq -er '.ami_id' "$SETTINGS_FILE")
+ROOT_VOLUME_SIZE=$(jq -er '.root_volume_size | select(type == "number" and floor == . and . >= 8 and . <= 16384)' "$SETTINGS_FILE")
+[[ -r "$INVENTORY_FILE" ]] || { echo 'Upload the repository hosts file.' >&2; exit 1; }
+mapfile -t SITES < <(awk 'NF && $1 !~ /^#/ {print $1}' "$INVENTORY_FILE" | sort -u)
+[[ ${#SITES[@]} -gt 0 ]] || { echo 'Inventory is empty.' >&2; exit 1; }
+for site in "${SITES[@]}"; do
+  [[ "$site" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]] || { echo "Invalid inventory site: $site" >&2; exit 1; }
+done
 
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 [[ "$EXPECTED_ACCOUNT" =~ ^[0-9]{12}$ && "$ACCOUNT_ID" == "$EXPECTED_ACCOUNT" ]] || {
-  echo 'Set EXPECTED_ACCOUNT to the intended CloudShell account.' >&2; exit 1;
+  echo 'Set aws_account_id to the intended CloudShell account in the shared settings.' >&2; exit 1;
 }
 [[ "$BUCKET" != REPLACE* && "$SUBNET_ID" == subnet-* && "$SECURITY_GROUP_ID" == sg-* ]] || {
   echo 'Set the bucket, subnet and security group.' >&2; exit 1;
@@ -66,11 +77,9 @@ ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 for value in "$USER_NAME" "$KEY_NAME" "$UPLOAD_ROLE" "$POLICY_NAME" "$MACHINE_TAG" "$INSTANCE_TYPE" "$REGION"; do
   [[ "$value" =~ ^[A-Za-z0-9_.+=,@-]+$ ]] || { echo "Invalid name: $value" >&2; exit 1; }
 done
-AMI_ID=$(aws ec2 describe-images --region "$REGION" --owners 099720109477 \
-  --filters 'Name=name,Values=ubuntu-minimal/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-minimal-*' \
-            Name=architecture,Values=x86_64 Name=state,Values=available \
-  --query 'sort_by(Images,&CreationDate)[-1].ImageId' --output text)
-[[ "$AMI_ID" =~ ^ami-[a-f0-9]+$ ]] || { echo 'No matching Ubuntu AMI found.' >&2; exit 1; }
+[[ "$AMI_ID" =~ ^ami-[a-f0-9]+$ ]] || { echo 'Pin ami_id in the shared settings first.' >&2; exit 1; }
+aws ec2 describe-images --region "$REGION" --owners 099720109477 --image-ids "$AMI_ID" --output json \
+  | jq -e '.Images | length == 1 and .[0].State == "available" and .[0].Architecture == "x86_64" and (.[0].Name | startswith("ubuntu-minimal/images/hvm-ssd-gp3/ubuntu-resolute-26.04-amd64-minimal-"))' > /dev/null
 
 POLICY_ARN="arn:aws:iam::$ACCOUNT_ID:policy/$POLICY_NAME"
 ROLE_ARN="arn:aws:iam::$ACCOUNT_ID:role/$UPLOAD_ROLE"
@@ -120,7 +129,7 @@ cat > "$WORK_DIR/operations-base.json" <<JSON
     {
       "Sid": "LaunchRootVolume", "Effect": "Allow", "Action": "ec2:RunInstances",
       "Resource": "$EC2_ARN:volume/*",
-      "Condition": {"StringEquals": {"ec2:VolumeType": "gp3"}, "NumericLessThanEquals": {"ec2:VolumeSize": "100"}}
+      "Condition": {"StringEquals": {"ec2:VolumeType": "gp3"}, "NumericLessThanEquals": {"ec2:VolumeSize": "$ROOT_VOLUME_SIZE"}}
     },
     {
       "Sid": "LaunchNetworkInterface", "Effect": "Allow", "Action": "ec2:RunInstances",
@@ -221,52 +230,34 @@ Reuse an existing access key for the chosen user if available. Otherwise, create
 one separately in CloudShell **once**, not on every setup run:
 
 ```bash
-aws iam list-access-keys --user-name backup-operator
-aws iam create-access-key --user-name backup-operator
+USER_NAME=$(jq -er '.iam_user_name' "$HOME/aws.yml")
+aws iam list-access-keys --user-name "$USER_NAME"
+# Run only if you need a new key:
+aws iam create-access-key --user-name "$USER_NAME"
 ```
 
 The second command displays a secret access key only once. Store it privately,
 enter it in your local AWS configuration, and do not paste it into this repository
-or a conversation. Substitute your chosen user name in both commands.
+or a conversation. The user name comes from the same uploaded settings file.
 
 In local WSL:
 
 ```bash
 aws configure --profile backup-validator
 aws sts get-caller-identity --profile backup-validator
-export AWS_PROFILE=backup-validator
 ```
 
 Enter the account's region during configuration. Use this profile for all local
 provision/configure/download/verification commands. Do not configure this user's
 keys on EC2: the AWS CLI there uses the upload instance role automatically.
 
-## 3. Run and verify
+## Maintenance
 
-Follow [Networking and SSH setup](NETWORKING-SSH.md), sections 3–4, for the shared
-Ansible variables and machine launch/configuration commands. Specify the upload
-instance-profile ARN instead of the playbook's legacy profile default.
-
-Check S3 reads locally (replace the bucket and site):
-
-```bash
-aws s3api list-objects-v2 --profile backup-validator \
-  --bucket BUCKET_NAME --prefix SITE_NAME/
-AWS_PROFILE=backup-validator ansible-playbook download-latest-backups.yml \
-  -e backup_bucket=BUCKET_NAME
-```
-
-On the backup machine, confirm `aws sts get-caller-identity` reports the upload
-role, then run `ansible-playbook backup-all-sites.yml -e backup_bucket=BUCKET_NAME`
-from its prepared checkout. Verify a fresh complete download and restore for each
-site. On a test machine, also exercise a multipart upload and failed-upload abort;
-use unique test keys and an administrator for subsequent object-version cleanup.
-Policy validation alone is not an end-to-end test.
-
-The creation playbook's `exact_count: 1` can terminate extra instances matching
-its tag. The destroy playbook hard-codes `us-east-1` and `backup_creator_tag` in its
-second play; review it before using other values, or terminate an explicitly
-verified instance ID. Scheduling and failure notifications are separate setup.
+Return to the [README operational commands](../README.md#aws-operations) to create,
+configure, back up, download, verify or destroy. All use the same settings file.
+Rerun this IAM block after editing sites in `hosts` or changing deployment settings;
+upload the updated files first. Changing a local file does not automatically change
+AWS permissions. IAM validation does not replace a complete backup/restore test.
 
 ## References
 
