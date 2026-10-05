@@ -1,15 +1,38 @@
-# Installs dependencies for running aws commands via ansible
-
-- name: Install python3 requirements
+---
+- name: Install the local AWS SDK with browser-login support
   hosts: localhost
   connection: local
   gather_facts: false
-  become: yes
-
+  vars:
+    aws_sdk_directory: "{{ playbook_dir }}/.venv/aws"
   tasks:
-    - name: Ensure modern dependencies exist for local cloud uploads
+    - name: Install Python virtual environment support
       ansible.builtin.apt:
-        name:
-          - python3-boto3
+        name: python3-venv
         state: present
+        update_cache: true
+        cache_valid_time: 3600
       become: true
+
+    - name: Install or upgrade Boto3 with AWS CRT in the repository environment
+      ansible.builtin.pip:
+        name: 'boto3[crt]>=1.41.0,<2'
+        state: latest
+        virtualenv: "{{ aws_sdk_directory }}"
+        virtualenv_command: /usr/bin/python3 -m venv
+
+    - name: Verify login support without accessing AWS
+      ansible.builtin.command:
+        argv:
+          - "{{ aws_sdk_directory }}/bin/python"
+          - -c
+          - |
+            import boto3, botocore, awscrt
+            from botocore.credentials import LoginProvider
+            print(f'boto3={boto3.__version__} botocore={botocore.__version__} awscrt={awscrt.__version__}')
+      changed_when: false
+      register: aws_sdk_versions
+
+    - name: Show the installed SDK versions
+      ansible.builtin.debug:
+        msg: "{{ aws_sdk_versions.stdout }}"

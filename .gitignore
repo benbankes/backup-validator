@@ -2,4 +2,5 @@ host_vars/*.yml
 archive.tar.gz
 backups/
 .restore/
+.venv/
 .idea

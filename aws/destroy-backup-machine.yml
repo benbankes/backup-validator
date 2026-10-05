@@ -3,6 +3,8 @@
   hosts: localhost
   connection: local
   gather_facts: false
+  vars:
+    ansible_python_interpreter: "{{ playbook_dir }}/../.venv/aws/bin/python"
   tasks:
     - name: Validate destruction settings and account
       ansible.builtin.include_tasks: ../tasks/validate-aws-settings.yml
