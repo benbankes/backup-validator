@@ -15,7 +15,8 @@ commands run as `ubuntu` on the backup machine.
 | 6. Terminate | Scoped termination permission | Machine tag and local IAM user |
 
 There is one local AWS profile: `backup-validator`. AWS credentials remain in
-that profile. The machine uses its EC2 role, with no user keys copied to it.
+that profile as an expiring browser-login session. The machine uses its EC2 role,
+with no user keys copied to it.
 CloudShell records discovered IDs in `~/backup-validator/aws.yml` as resources
 become available. The file uses JSON syntax, also accepted by Ansible as YAML.
 There is no bucket field until stage 3 and no placeholder IDs to fill in locally.
@@ -84,9 +85,18 @@ cat "$SETTINGS"
 ### 1.2 WSL: prepare the operator public key
 
 Local prerequisites: Bash, OpenSSH, Ansible with the `amazon.aws` and
-`ansible.posix` collections, Python `boto3`/`botocore`, and `jq`. Install AWS CLI
-v2 if needed with `ansible-playbook install-aws-cli.yml` (uses passwordless sudo).
-No AWS profile or local settings file is required yet.
+`ansible.posix` collections, and `jq`. Install AWS CLI v2 (2.32.0 or later) if
+needed with `ansible-playbook install-aws-cli.yml` (uses passwordless sudo).
+Install the SDK used by the local AWS playbooks:
+
+```bash
+ansible-playbook install-python3-requirements.yml
+```
+
+This installs/upgrades Boto3 1.41.0+ with AWS CRT in `.venv/aws`, leaving Ubuntu's
+system Python packages intact. The local plays under `aws/` explicitly use this
+interpreter; no virtual-environment activation is required. Run the installer in
+each new checkout. No AWS profile or local settings file is required yet.
 
 Create or reuse the operator key. Choose a passphrase when prompted; load the key
 into your SSH agent with `ssh-add ~/.ssh/backup-validator/operator` before Ansible.
@@ -135,7 +145,7 @@ AZ=$(jq -er '.availability_zone' "$SETTINGS_FILE")
 NETWORK_NAME='backup-validator'
 VPC_CIDR='10.80.0.0/16'
 SUBNET_CIDR='10.80.1.0/24'
-OPERATOR_CIDR='REPLACE_WITH_YOUR_PUBLIC_IP/32'
+OPERATOR_CIDR='209.147.110.171/32'
 # Initially empty; later backup setup records website destinations here.
 mapfile -t SITE_SSH_CIDRS < <(jq -r '.site_ssh_cidrs // [] | .[]' "$SETTINGS_FILE")
 KEY_NAME=$(jq -er '.key_name' "$SETTINGS_FILE")
@@ -275,8 +285,13 @@ and keys are preserved and may confer additional permissions. This block creates
 an EC2 role/profile with its trust policy now, because launching the machine
 requires the profile. It grants that role no S3 access yet.
 
-The operator gets AWS-managed `ReadOnlyAccess` and narrowly scoped launch/tag/pass-role
-permissions. No bucket, site inventory or website credentials are needed here.
+The operator gets AWS-managed `ReadOnlyAccess`, `SignInLocalDevelopmentAccess`,
+and narrowly scoped launch/tag/pass-role permissions. If the user has no console
+login, the block prompts twice for a password without echoing it. Choose and save
+a password that meets the account's password policy. It is sent through a private
+temporary JSON file, then removed; it is never printed or put in command arguments.
+An existing console password is preserved. No permanent access key is created.
+No bucket, site inventory or website credentials are needed here.
 Policy updates are idempotent; a changed policy at the five-version limit removes
 its oldest nondefault version. IAM propagation may briefly delay first use.
 
@@ -423,38 +438,47 @@ else
     --policy-document "file://$WORK_DIR/operations.json" > /dev/null
 fi
 aws iam attach-user-policy --user-name "$USER_NAME" --policy-arn arn:aws:iam::aws:policy/ReadOnlyAccess
+aws iam attach-user-policy --user-name "$USER_NAME" --policy-arn arn:aws:iam::aws:policy/SignInLocalDevelopmentAccess
 aws iam attach-user-policy --user-name "$USER_NAME" --policy-arn "$POLICY_ARN"
+# Prompt only when enabling console access for the first time.
+# Disable shell tracing before handling the password, even if the caller enabled it.
+set +x
+if ! exists aws iam get-login-profile --user-name "$USER_NAME"; then
+  read -r -s -p "Choose a console password for $USER_NAME: " CONSOLE_PASSWORD < /dev/tty
+  printf '\n' > /dev/tty
+  read -r -s -p 'Repeat the console password: ' CONFIRM_PASSWORD < /dev/tty
+  printf '\n' > /dev/tty
+  [[ -n "$CONSOLE_PASSWORD" && "$CONSOLE_PASSWORD" == "$CONFIRM_PASSWORD" ]] || {
+    echo 'Passwords are empty or do not match; rerun this step.' >&2; exit 1;
+  }
+  printf '%s' "$CONSOLE_PASSWORD" | jq -Rs --arg user "$USER_NAME" \
+    '{UserName:$user, Password:., PasswordResetRequired:false}' > "$WORK_DIR/login.json"
+  unset CONSOLE_PASSWORD CONFIRM_PASSWORD
+  aws iam create-login-profile --cli-input-json "file://$WORK_DIR/login.json" > /dev/null
+  rm -f -- "$WORK_DIR/login.json"
+fi
+printf 'Console sign-in: https://%s.signin.aws.amazon.com/console\nUser: %s\n' "$ACCOUNT_ID" "$USER_NAME"
 printf 'User: %s\nInstance profile: %s\nAllowed AMI: %s\n' "$USER_NAME" "$PROFILE_ARN" "$AMI_ID"
 )
 ```
 
-### 1.5 CloudShell, then WSL: configure the user and download real settings
+### 1.5 CloudShell, then WSL: browser login and download real settings
 
-If you already have a usable access key for this user, reuse it. Otherwise, run
-this **CloudShell** block once to create a key. It refuses to add a key when one
-already exists; recover or deliberately rotate an existing key separately.
+If returning from the older access-key instructions, rerun **1.4** first. It adds
+console access (only if missing) and the browser-login permission; earlier network
+steps do not need repeating. Run the SDK installer from 1.2 if not already updated.
 
-```bash
-(
-set -euo pipefail
-SETTINGS="$HOME/backup-validator/aws.yml"
-USER_NAME=$(jq -er '.iam_user_name' "$SETTINGS")
-[[ $(aws sts get-caller-identity --query Account --output text) == "$(jq -r '.aws_account_id' "$SETTINGS")" ]]
-KEYS=$(aws iam list-access-keys --user-name "$USER_NAME" --output json)
-[[ $(jq '.AccessKeyMetadata | length' <<< "$KEYS") == 0 ]] || {
-  echo 'This user already has access keys. Reuse one or rotate it separately.' >&2; exit 1;
-}
-aws iam create-access-key --user-name "$USER_NAME"
-)
-```
+Use the account-specific console URL printed by 1.4 and sign in as the dedicated
+operator user. When the CLI opens the browser, choose this user's session rather
+than an administrator/root session. Enable MFA for this console user through your
+account's normal administrator-managed enrollment process.
 
-Store the secret privately; AWS displays it only once. Do not put it in the
-repository or chat. Use CloudShell **Actions → Download file** to download
+In the **administrator CloudShell**, use **Actions → Download file** to download
 `/home/cloudshell-user/backup-validator/aws.yml` (use `echo "$HOME"` if your home
-path differs). The file contains configuration only, not keys.
+path differs). The file contains configuration only, not credentials.
 
 In **WSL**, run this block and supply the path to that downloaded file. It sets
-the profile's region, prompts for credentials and checks that those credentials
+the profile's region, opens browser-based login and checks that the credentials
 belong to the expected account/user. It then writes the local settings, adding
 only the local SSH-key path. No account IDs or resource IDs need retyping.
 Existing local settings are kept as `aws.yml.previous` before replacement.
@@ -466,12 +490,26 @@ umask 077
 read -r -p 'Path to the downloaded aws.yml in WSL: ' DOWNLOADED
 REGION=$(jq -er '.aws_region' "$DOWNLOADED")
 aws configure set region "$REGION" --profile backup-validator
-aws configure --profile backup-validator
+aws login --profile backup-validator --remote
 IDENTITY=$(aws sts get-caller-identity --profile backup-validator --output json)
 ACCOUNT=$(jq -er '.Account' <<< "$IDENTITY")
 USER_NAME=$(jq -er '.iam_user_name' "$DOWNLOADED")
 jq -e --arg account "$ACCOUNT" '.aws_account_id == $account' "$DOWNLOADED" > /dev/null
 [[ $(jq -r '.Arn' <<< "$IDENTITY") == "arn:aws:iam::$ACCOUNT:user/$USER_NAME" ]]
+# Check the exact SDK used by Ansible, and reject credentials shadowing the login.
+SDK_IDENTITY=$(.venv/aws/bin/python - <<'PYTHON'
+import json
+import boto3
+session = boto3.Session(profile_name="backup-validator")
+credentials = session.get_credentials()
+if credentials is None or credentials.method != "login":
+    raise SystemExit("Expected browser-login credentials. Remove stale static credentials for this profile and unset AWS credential environment variables, then retry.")
+identity = session.client("sts").get_caller_identity()
+print(json.dumps({"Account": identity["Account"], "Arn": identity["Arn"]}))
+PYTHON
+)
+jq -e --arg account "$ACCOUNT" --arg arn "arn:aws:iam::$ACCOUNT:user/$USER_NAME" \
+  '.Account == $account and .Arn == $arn' <<< "$SDK_IDENTITY" > /dev/null
 SETTINGS="$HOME/.config/backup-validator/aws.yml"
 mkdir -p "$(dirname "$SETTINGS")"
 if [[ -f "$SETTINGS" ]]; then cp -p "$SETTINGS" "$SETTINGS.previous"; fi
@@ -483,6 +521,14 @@ install -m 600 "$WORK_FILE" "$SETTINGS"
 printf 'Local settings ready: %s\n' "$SETTINGS"
 )
 ```
+
+`--remote` prints a URL to open in the Windows browser and asks for the returned
+code in WSL. The CLI and SDK refresh temporary credentials during the session.
+When the session expires (at most 12 hours), rerun
+`aws login --profile backup-validator --remote`; the settings file remains valid.
+Do not run `aws configure` to enter access keys. If this profile previously held
+static keys, remove those profile entries and unset exported credential variables
+so they do not override browser login. Existing AWS keys are not deleted by setup.
 
 ### 1.6 WSL: provision the machine
 
@@ -843,3 +889,6 @@ checking.
 - [S3 bucket creation](https://docs.aws.amazon.com/cli/latest/reference/s3api/create-bucket.html)
 - [S3 lifecycle configuration](https://docs.aws.amazon.com/cli/latest/reference/s3api/put-bucket-lifecycle-configuration.html)
 - [Reading IAM role metadata and tags](https://docs.aws.amazon.com/cli/latest/reference/iam/get-role.html)
+
+- [Browser login with console credentials](https://docs.aws.amazon.com/cli/latest/userguide/cli-configure-sign-in.html)
+- [Boto3 login prerequisites](https://docs.aws.amazon.com/boto3/latest/guide/credentials.html#login-with-console-credentials)

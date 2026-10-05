@@ -3,13 +3,14 @@
 For commands, follow the [chronological setup guide](SETUP.md). This page explains
 the resulting access; it is not a second setup procedure.
 
-Use one local profile, `backup-validator`, backed by a dedicated IAM user. The EC2
+Use one local profile, `backup-validator`, backed by browser login as a dedicated IAM user. No permanent access key is
+required. The EC2
 machine uses a dedicated role and instance profile with the same name. No user
 access keys are installed on EC2.
 
 | Introduced at | Identity | Permissions and scope |
 | --- | --- | --- |
-| [Provisioning, 1.4](SETUP.md#14-cloudshell-create-provisioning-access) | Local user | AWS-managed `ReadOnlyAccess`, plus managed `backup-validator-operations` for the pinned AMI, subnet, security group, key pair, instance type, root disk limit and profile |
+| [Provisioning, 1.4](SETUP.md#14-cloudshell-create-provisioning-access) | Local user | AWS-managed `ReadOnlyAccess` and `SignInLocalDevelopmentAccess`, plus managed `backup-validator-operations` for the pinned AMI, subnet, security group, key pair, instance type, root disk limit and profile |
 | Provisioning, 1.4 | EC2 role | Trust for `ec2.amazonaws.com`; no S3 permissions yet |
 | [Backup/upload, 3.2](SETUP.md#32-cloudshell-grant-archive-upload-access-and-publish-the-bucket-name) | User and EC2 role | Inline `BackupUpload`: `s3:PutObject` and `s3:AbortMultipartUpload` on `<bucket>/<site>/<site>-*.tar.gz` for each inventory site |
 | Download | Local user | Existing read access covers S3 list/get operations; no new policy |
@@ -53,3 +54,11 @@ permissions by itself.
 - [Managed policy versioning](https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies_managed-versioning.html)
 - [EC2 permission scopes](https://docs.aws.amazon.com/service-authorization/latest/reference/list_ec2.html)
 - [IAM quotas](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_iam-quotas.html)
+
+Console access is created in setup step 1.4 only if missing; reruns preserve the
+password. `SignInLocalDevelopmentAccess` enables CLI login, while the resource
+policies still define what the user can do. Step 1.5 checks both CLI and SDK identity
+as the operator. The SDK installer supplies Boto3 with AWS CRT in `.venv/aws` for
+Ansible's local AWS modules. EC2 continues using its instance role.
+
+- [SignInLocalDevelopmentAccess](https://docs.aws.amazon.com/aws-managed-policy/latest/reference/SignInLocalDevelopmentAccess.html)
