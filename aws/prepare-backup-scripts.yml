@@ -5,10 +5,11 @@
   hosts: localhost
   connection: local
   gather_facts: false
-  vars:
-    aws_region: "us-east-1"
-    tag_name: "backup_creator_tag"
   tasks:
+    - name: Validate settings needed on the backup machine
+      ansible.builtin.include_tasks: ../tasks/validate-aws-settings.yml
+      vars:
+        aws_required_settings: [backup_bucket]
     - ansible.builtin.include_tasks: tasks/discover-ip.yml
 
 - name: Configure backup machine
@@ -38,3 +39,21 @@
         src: "{{playbook_dir}}/../host_vars/" # Trailing slash ensures content-only copying
         dest: /home/ubuntu/backup-validator/host_vars/
         mode: "0600" # Restricts raw files so only the ubuntu runner can read them
+
+    - name: Copy the authoritative site inventory
+      ansible.builtin.copy:
+        src: "{{ playbook_dir }}/../hosts"
+        dest: /home/ubuntu/backup-validator/hosts
+        mode: '0600'
+
+    - name: Create the remote settings directory
+      ansible.builtin.file:
+        path: /home/ubuntu/.config/backup-validator
+        state: directory
+        mode: '0700'
+
+    - name: Copy only backup runtime settings (no credentials)
+      ansible.builtin.copy:
+        content: "{{ {'aws_account_id': aws_account_id, 'aws_region': aws_region, 'backup_bucket': backup_bucket} | to_nice_json }}"
+        dest: /home/ubuntu/.config/backup-validator/aws.yml
+        mode: '0600'

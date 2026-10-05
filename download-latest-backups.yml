@@ -1,18 +1,24 @@
 ---
-# Run inside WSL: ansible-playbook download-latest-backups.yml
+# Run inside WSL with -e @/path/to/aws.yml; see README.md.
 - name: Download the latest S3 backup for every inventory site
   hosts: localhost
   connection: local
   gather_facts: false
   become: false
   environment:
+    AWS_DEFAULT_REGION: "{{ aws_region | default('') }}"
+    AWS_REGION: "{{ aws_region | default('') }}"
     AWS_PAGER: ''
     AWS_CLI_AUTO_PROMPT: 'off'
   vars:
-    backup_bucket: flextalk-backups
     backup_directory: "{{ playbook_dir }}/backups"
 
   tasks:
+    - name: Validate download settings and account
+      ansible.builtin.include_tasks: tasks/validate-aws-settings.yml
+      vars:
+        aws_required_settings: [backup_bucket]
+
     - name: Require sites in the inventory
       ansible.builtin.assert:
         that: groups['all'] | difference(['localhost']) | length > 0

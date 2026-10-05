@@ -6,6 +6,17 @@
 #   - Put web files in their own folder.
 # - Upload it to S3
 
+- name: Validate backup destination before accessing production
+  hosts: localhost
+  any_errors_fatal: true
+  connection: local
+  gather_facts: false
+  tasks:
+    - name: Validate backup settings and account
+      ansible.builtin.include_tasks: tasks/validate-aws-settings.yml
+      vars:
+        aws_required_settings: [backup_bucket]
+
 - name: Grant remote access to machines from which backups are being taken
   hosts: all
   gather_facts: false
@@ -51,6 +62,14 @@
       register: tar_result
       failed_when: tar_result.rc not in [0, 1] # 0 = Success, 1 = Minor, non-fatal anomalies, e.g. "Some files differ" (e.g. from failure to read some files)
 
+    - name: Measure the completed archive for S3 multipart upload sizing
+      ansible.builtin.stat:
+        path: "/home/{{ ansible_user }}/ansible-backup-archives/archive.tar.gz"
+        get_checksum: false
+        get_mime: false
+        get_attributes: false
+      register: backup_archive
+
     # Leverage the orchestrator to pipe/stream the archive directly from the production host to S3
     - name: Pipe archive download directly into Amazon S3 simultaneously
       ansible.builtin.shell: >
@@ -60,10 +79,13 @@
         {{ ansible_user }}@{{ ansible_host }} 
         "cat /home/{{ ansible_user }}/ansible-backup-archives/archive.tar.gz" 
         | aws s3 cp - 
-        s3://flextalk-backups/{{ inventory_hostname }}/{{ inventory_hostname }}-{{ lookup('ansible.builtin.pipe', 'date +%Y-%m-%d') }}.tar.gz
+        s3://{{ backup_bucket }}/{{ inventory_hostname }}/{{ inventory_hostname }}-{{ lookup('ansible.builtin.pipe', 'date +%Y-%m-%d') }}.tar.gz
+        --expected-size {{ backup_archive.stat.size }}
       args:
         executable: /bin/bash
       delegate_to: localhost
       # This block passes the password directly into memory, hiding it from process logs
       environment:
         SSHPASS: "{{ ansible_password }}"
+        AWS_DEFAULT_REGION: "{{ aws_region }}"
+        AWS_REGION: "{{ aws_region }}"
