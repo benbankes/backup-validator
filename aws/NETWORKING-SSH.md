@@ -9,7 +9,9 @@ The machine uses a dedicated public subnet, internet gateway and public IPv4
 address. It needs no NAT gateway. Its security group initially allows inbound
 TCP 22 from the operator's public IPv4 `/32`, and outbound TCP 80/443 for package
 installation. Backup setup adds outbound TCP 22 to the website SSH servers'
-IPv4 CIDRs. Website addresses must come from `ansible_host`, not a CDN hostname.
+IPv4 CIDRs. Run `./website-ssh-cidrs.sh` in WSL to derive these from the inventory's
+`ansible_host` values automatically; it resolves server hostnames, not website/CDN
+names. Paste its final array assignment into CloudShell before step 3.3.
 
 Keep the default network ACL or configure return traffic explicitly. Custom ACLs
 are not validated by the setup commands. DNS must remain available through the

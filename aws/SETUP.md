@@ -85,7 +85,21 @@ cat "$SETTINGS"
 ### 1.2 WSL: prepare the operator public key
 
 Local prerequisites: Bash, OpenSSH, Ansible with the `amazon.aws` and
-`ansible.posix` collections, and `jq`. Install AWS CLI v2 (2.32.0 or later) if
+`ansible.posix` collections, and `jq`. Install `jq` in **Ubuntu/WSL** using the
+distribution package manager, then verify it:
+
+```bash
+sudo apt update
+sudo apt install -y jq
+jq --version
+```
+
+Run these commands in the same WSL distribution where you run the playbooks;
+installing a Windows executable does not install the Ubuntu package. CloudShell
+already provides `jq`. If a later step reports `jq: command not found`, run this
+block and then rerun that step from its beginning.
+
+Install AWS CLI v2 (2.32.0 or later) if
 needed with `ansible-playbook install-aws-cli.yml` (uses passwordless sudo).
 Install the SDK used by the local AWS playbooks:
 
@@ -620,12 +634,12 @@ mv "$WORK_DIR/settings.json" "$SETTINGS"
 
 ### 3.2 CloudShell: grant archive upload access and publish the bucket name
 
-Upload the repository's current `hosts` file to CloudShell as `~/hosts`. It is the
-single site list: one hostname per line, with optional blank/comment lines.
-Do not upload private `host_vars` files. This block grants both the EC2 role and
-the operator user upload/abort access only to the listed sites' archive paths.
-It tags the role with the established bucket name so the read-only local user
-can discover it without another settings-file download.
+This block grants both the EC2 role and the operator user upload/abort access to
+all object paths in the dedicated backup bucket. New sites need no IAM changes;
+no inventory upload is required. The uploader can write or overwrite any object
+in this bucket, but this policy grants no object reads, deletions or access to
+other buckets. The operator retains its separately granted broad read access.
+The role's bucket tag lets the local user discover the destination automatically.
 
 ```bash
 (
@@ -640,20 +654,12 @@ USER_NAME=$(jq -er '.iam_user_name' "$SETTINGS")
 ROLE=$(jq -er '.upload_role' "$SETTINGS")
 [[ $(aws sts get-caller-identity --query Account --output text) == "$ACCOUNT" ]]
 aws s3api head-bucket --bucket "$BUCKET" --expected-bucket-owner "$ACCOUNT" --region "$REGION"
-[[ -r "$HOME/hosts" ]]
-mapfile -t SITES < <(awk 'NF && $1 !~ /^#/ {print $1}' "$HOME/hosts" | sort -u)
-[[ ${#SITES[@]} -gt 0 ]]
-for site in "${SITES[@]}"; do [[ "$site" =~ ^[A-Za-z0-9][A-Za-z0-9.-]*$ ]]; done
 WORK_DIR=$(mktemp -d)
 trap 'rm -rf -- "$WORK_DIR"' EXIT
-jq -n --arg bucket "$BUCKET" --args '{Version:"2012-10-17",Statement:[{
+jq -n --arg bucket "$BUCKET" '{Version:"2012-10-17",Statement:[{
   Sid:"UploadArchives",Effect:"Allow",Action:["s3:PutObject","s3:AbortMultipartUpload"],
-  Resource:($ARGS.positional | map("arn:aws:s3:::\($bucket)/\(.)/\(.)-*.tar.gz"))
-}]}' "${SITES[@]}" > "$WORK_DIR/upload.json"
-# Leave room within the smaller, aggregate IAM user inline-policy limit.
-[[ $(jq -c . "$WORK_DIR/upload.json" | wc -c) -lt 1500 ]] || {
-  echo 'Site list exceeds the inline-policy budget; use a managed upload policy.' >&2; exit 1;
-}
+  Resource:["arn:aws:s3:::\($bucket)/*"]
+}]}' > "$WORK_DIR/upload.json"
 aws accessanalyzer validate-policy --region "$REGION" --policy-type IDENTITY_POLICY \
   --policy-document "file://$WORK_DIR/upload.json" > "$WORK_DIR/findings.json"
 jq -e '.findings | length == 0' "$WORK_DIR/findings.json" > /dev/null || {
@@ -667,18 +673,34 @@ aws iam tag-role --role-name "$ROLE" --tags "Key=BackupBucket,Value=$BUCKET"
 
 ### 3.3 CloudShell: allow outbound website SSH
 
-Set the website SSH servers' IPv4 CIDRs below using their `ansible_host` addresses,
-not CDN/web-server addresses. Prefer `/32` entries for individual servers. No new
-inbound rule is needed. Existing matching SSH egress is reused; conflicting rules
-stop the block for review. Recorded CIDRs let network setup recognize these rules
-on later reruns.
+First run this command from the repository in **WSL**:
+
+```bash
+./website-ssh-cidrs.sh
+```
+
+It reads each site's effective `ansible_host` through Ansible, resolves all IPv4
+addresses and removes duplicates. The website's inventory name is only a label;
+it is never used as the SSH endpoint. Missing hosts, failed resolution or an
+unsupported SSH port stop the command without emitting a partial assignment.
+Only host/address mappings and the generated CIDRs are printed, not credentials.
+
+Copy the final `SITE_SSH_CIDRS=(...)` line and paste it into **CloudShell**. Then
+paste the block below into that same CloudShell session. The block uses the array
+you just pasted; there is no placeholder to replace and no settings-file upload.
+
+No new inbound rule is needed. Existing matching SSH egress is reused; conflicting
+rules stop for review. Recorded CIDRs let network setup recognize these rules on
+later reruns. If a server's DNS addresses change, rerun the helper and update the
+reviewed rules. Resolution uses WSL's DNS; SSH names must resolve to addresses
+reachable from EC2.
 
 ```bash
 (
 set -euo pipefail
 export AWS_PAGER=''
 umask 077
-SITE_SSH_CIDRS=('REPLACE_WITH_WEBSITE_SSH_IP/32')
+: "${SITE_SSH_CIDRS:?Paste the SITE_SSH_CIDRS array from website-ssh-cidrs.sh first}"
 for cidr in "${SITE_SSH_CIDRS[@]}"; do
   [[ "$cidr" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+/[0-9]+$ ]]
 done
@@ -871,8 +893,10 @@ are first introduced; they do not revoke permissions between runs.
 For a different account, start at 1.1 in that account's CloudShell and use 1.5 to
 replace the local profile/settings. For a changed AMI, type, disk size or machine
 tag, edit CloudShell settings and rerun 1.4, then download/import settings through
-1.5. Refresh 6.1 if the termination scope changes. For site changes, upload the
-new `hosts`, rerun 3.2 and 3.4, and adjust 3.3/provider SSH access as necessary.
+1.5. Refresh 6.1 if the termination scope changes. For site changes, update the local
+`hosts` and private host variables, rerun 3.4, and adjust 3.3/provider SSH access
+as necessary. Site changes do not require IAM updates; rerun 3.2 only if the
+bucket or upload identities change.
 Changed existing firewall rules require deliberate review; reruns flag conflicts.
 
 Never edit both copies independently: CloudShell owns AWS resource settings;

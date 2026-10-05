@@ -12,7 +12,7 @@ access keys are installed on EC2.
 | --- | --- | --- |
 | [Provisioning, 1.4](SETUP.md#14-cloudshell-create-provisioning-access) | Local user | AWS-managed `ReadOnlyAccess` and `SignInLocalDevelopmentAccess`, plus managed `backup-validator-operations` for the pinned AMI, subnet, security group, key pair, instance type, root disk limit and profile |
 | Provisioning, 1.4 | EC2 role | Trust for `ec2.amazonaws.com`; no S3 permissions yet |
-| [Backup/upload, 3.2](SETUP.md#32-cloudshell-grant-archive-upload-access-and-publish-the-bucket-name) | User and EC2 role | Inline `BackupUpload`: `s3:PutObject` and `s3:AbortMultipartUpload` on `<bucket>/<site>/<site>-*.tar.gz` for each inventory site |
+| [Backup/upload, 3.2](SETUP.md#32-cloudshell-grant-archive-upload-access-and-publish-the-bucket-name) | User and EC2 role | Inline `BackupUpload`: `s3:PutObject` and `s3:AbortMultipartUpload` on `<bucket>/*`, independent of the site inventory |
 | Download | Local user | Existing read access covers S3 list/get operations; no new policy |
 | Local restore/verification | None | No AWS access |
 | [Termination, 6.1](SETUP.md#61-cloudshell-grant-scoped-termination-permission) | Local user | Inline `BackupTermination`: `ec2:TerminateInstances` restricted to region/account and the configured Name tag |
@@ -38,9 +38,11 @@ restrict access. Live testing is required to confirm the account's effective acc
 Provisioning-policy updates compare content before creating a managed-policy
 version. At the five-version limit, changed policies replace the oldest nondefault
 version. Later upload/termination policies are separate, so rerunning provisioning
-does not erase them. The upload block checks its size to leave room under the IAM
-user's aggregate inline-policy limit; larger inventories need a managed policy.
-Unrelated inline policies count toward the same limit.
+does not erase them. The upload policy covers all object paths in the dedicated
+backup bucket, including overwrites, so adding a site requires no IAM update.
+The EC2 upload role receives no read/delete access from this policy. The local
+user retains its separate broad read access. Unrelated inline policies count
+toward the IAM user's aggregate inline-policy limit.
 
 Permissions remain after a stage completes; the staged guide adds them when first
 needed. Rerun the relevant stage after changing its inputs, and allow for IAM
